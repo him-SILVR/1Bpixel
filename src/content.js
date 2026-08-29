@@ -1,45 +1,31 @@
 /**
  * =========================================================
  * BILLION PIXEL CANVAS
- * Content Management
+ * CONTENT ENGINE
  * =========================================================
  *
- * OWNERSHIP RULE
+ * Content belongs to permanent pixel ownership.
  *
- * Buying pixels gives the buyer permanent ownership of the
- * purchased canvas area.
+ * The owner of a pixel may publish permitted content to it.
  *
- * It does NOT grant ownership of the website itself and does
- * not override applicable law or platform rules.
+ * IMPORTANT:
  *
- * =========================================================
+ * Ownership does NOT override applicable law or platform
+ * safety rules.
  *
- * CONTENT TYPES
+ * Prohibited material includes, among other things:
  *
- * IMAGE
- * TEXT
- * LOGO
- * LINK
- * ARTWORK
+ * - child sexual abuse material
+ * - sexual exploitation
+ * - non-consensual intimate imagery
+ * - terrorism-related material
+ * - illegal threats/incitement
+ * - illegal content generally
+ * - prohibited hate content
  *
- * =========================================================
- *
- * SAFETY
- *
- * The platform supports broad expression, but content that is
- * illegal or otherwise prohibited by applicable law/platform
- * requirements cannot be published.
- *
- * Adult content:
- *
- * - Adult District only
- * - 18+ users only
- * - age verification required
- * - no child sexual content
- * - no sexual exploitation
- * - no non-consensual sexual content
- * - no trafficking content
- * - no illegal sexual material
+ * Adult content may only exist inside the Adult District
+ * and requires the district's minimum purchase of 100,000
+ * pixels.
  *
  * =========================================================
  */
@@ -47,90 +33,80 @@
 "use strict";
 
 
+import {
+    getOwnership
+} from "./allocator.js";
+
+
+import {
+    getDistrict
+} from "./coordinates.js";
+
+
 /* =========================================================
    CONSTANTS
 ========================================================= */
 
-export const CONTENT_TYPES = Object.freeze([
-    "IMAGE",
-    "TEXT",
-    "LOGO",
-    "LINK",
-    "ARTWORK"
-]);
+const MAX_TITLE_LENGTH =
+    200;
 
 
-export const CONTENT_STATUSES = Object.freeze([
-    "DRAFT",
-    "PUBLISHED",
-    "HIDDEN",
-    "REMOVED"
-]);
+const MAX_DESCRIPTION_LENGTH =
+    5_000;
 
 
-export const MAX_TITLE_LENGTH = 160;
+const MAX_ALT_TEXT_LENGTH =
+    500;
 
-export const MAX_DESCRIPTION_LENGTH = 5000;
 
-export const MAX_ALT_TEXT_LENGTH = 500;
-
-export const MAX_EXTERNAL_URL_LENGTH = 2048;
+const MAX_URL_LENGTH =
+    2_048;
 
 
 /* =========================================================
-   DISTRICT RULES
+   CONTENT TYPES
 ========================================================= */
 
-const DISTRICT_RULES = Object.freeze({
+const ALLOWED_CONTENT_TYPES =
+    new Set([
 
-    people: {
+        "IMAGE",
 
-        adultOnly:
-            false,
+        "TEXT",
 
-        familyFriendly:
-            false
+        "LOGO",
 
-    },
+        "LINK",
 
+        "ARTWORK"
 
-    giants: {
-
-        adultOnly:
-            false,
-
-        familyFriendly:
-            false
-
-    },
-
-
-    youth: {
-
-        adultOnly:
-            false,
-
-        familyFriendly:
-            true
-
-    },
-
-
-    adult: {
-
-        adultOnly:
-            true,
-
-        familyFriendly:
-            false
-
-    }
-
-});
+    ]);
 
 
 /* =========================================================
-   VALIDATION HELPERS
+   CONTENT STATUS
+========================================================= */
+
+export const CONTENT_STATUS =
+    Object.freeze({
+
+        DRAFT:
+            "DRAFT",
+
+        PUBLISHED:
+            "PUBLISHED",
+
+        HIDDEN:
+            "HIDDEN",
+
+        REMOVED:
+            "REMOVED"
+
+    });
+
+
+/* =========================================================
+   BASIC STRING CLEANING
 ========================================================= */
 
 function cleanString(
@@ -139,7 +115,8 @@ function cleanString(
 ) {
 
     if (
-        typeof value !== "string"
+        value === null ||
+        value === undefined
     ) {
 
         return "";
@@ -147,7 +124,19 @@ function cleanString(
     }
 
 
+    if (
+        typeof value !== "string"
+    ) {
+
+        throw new Error(
+            "Invalid text value."
+        );
+
+    }
+
+
     return value
+        .normalize("NFKC")
         .trim()
         .slice(
             0,
@@ -157,67 +146,62 @@ function cleanString(
 }
 
 
-function isValidUrl(
+/* =========================================================
+   URL VALIDATION
+========================================================= */
+
+function validateUrl(
     value
 ) {
 
+    const url =
+        cleanString(
+            value,
+            MAX_URL_LENGTH
+        );
+
+
     if (
-        typeof value !== "string"
+        !url
     ) {
 
-        return false;
+        return null;
 
     }
 
 
-    if (
-        value.length >
-        MAX_EXTERNAL_URL_LENGTH
-    ) {
-
-        return false;
-
-    }
+    let parsed;
 
 
     try {
 
-        const url =
+        parsed =
             new URL(
-                value
+                url
             );
-
-
-        /*
-         * Only web URLs are accepted.
-         */
-
-        return (
-            url.protocol === "https:" ||
-            url.protocol === "http:"
-        );
 
     } catch {
 
-        return false;
+        throw new Error(
+            "Invalid URL."
+        );
 
     }
 
-}
+
+    if (
+        parsed.protocol !== "https:" &&
+        parsed.protocol !== "http:"
+    ) {
+
+        throw new Error(
+            "Only HTTP and HTTPS URLs are allowed."
+        );
+
+    }
 
 
-/* =========================================================
-   DISTRICT
-========================================================= */
-
-function getDistrictRule(
-    districtId
-) {
-
-    return (
-        DISTRICT_RULES[districtId] ||
-        null
-    );
+    return parsed.toString();
 
 }
 
@@ -226,13 +210,21 @@ function getDistrictRule(
    CONTENT TYPE
 ========================================================= */
 
-export function validateContentType(
-    contentType
+function validateContentType(
+    value
 ) {
 
+    const type =
+        String(
+            value || ""
+        )
+            .trim()
+            .toUpperCase();
+
+
     if (
-        !CONTENT_TYPES.includes(
-            contentType
+        !ALLOWED_CONTENT_TYPES.has(
+            type
         )
     ) {
 
@@ -242,109 +234,86 @@ export function validateContentType(
 
     }
 
+
+    return type;
+
 }
 
 
 /* =========================================================
-   BASIC CONTENT VALIDATION
+   CONTENT SAFETY
 ========================================================= */
 
-export function validateContentInput(
-    input
+/**
+ * This function provides a server-side policy gate.
+ *
+ * It does NOT attempt to perfectly classify arbitrary images
+ * or text. A production deployment should add automated
+ * moderation and human review where appropriate.
+ */
+
+function validateContentPolicy(
+    content,
+    district
 ) {
 
+    const adult =
+        content.isAdultContent === true;
+
+
+    /*
+     * Adult material can only be attached to the Adult
+     * District.
+     */
+
     if (
-        !input ||
-        typeof input !== "object"
+        adult &&
+        !district.adultOnly
     ) {
 
         throw new Error(
-            "Content payload is required."
+            "Adult content is only permitted in the Adult District."
         );
 
     }
 
 
-    validateContentType(
-        input.contentType
-    );
-
-
-    const title =
-        cleanString(
-            input.title,
-            MAX_TITLE_LENGTH
-        );
-
-
-    const description =
-        cleanString(
-            input.description,
-            MAX_DESCRIPTION_LENGTH
-        );
-
-
-    const altText =
-        cleanString(
-            input.altText,
-            MAX_ALT_TEXT_LENGTH
-        );
-
-
-    const externalUrl =
-        cleanString(
-            input.externalUrl,
-            MAX_EXTERNAL_URL_LENGTH
-        );
-
+    /*
+     * The Adult District itself is restricted.
+     */
 
     if (
-        externalUrl &&
-        !isValidUrl(
-            externalUrl
-        )
+        adult &&
+        district.id !== "adult"
     ) {
 
         throw new Error(
-            "External URL must be a valid HTTP or HTTPS URL."
+            "Invalid adult-content district."
         );
 
     }
 
 
+    /*
+     * Never allow the platform to be used for illegal material.
+     *
+     * These fields are supplied by the application/admin
+     * moderation layer when content has been reviewed.
+     */
+
     if (
-        input.contentType ===
-        "LINK" &&
-        !externalUrl
+        content.policyStatus ===
+        "PROHIBITED"
     ) {
 
         throw new Error(
-            "Link content requires an external URL."
+            "This content is prohibited."
         );
 
     }
 
 
-    return {
-
-        contentType:
-            input.contentType,
-
-        title,
-
-        description,
-
-        altText,
-
-        imageUrl:
-            cleanString(
-                input.imageUrl,
-                MAX_EXTERNAL_URL_LENGTH
-            ),
-
-        externalUrl
-
-    };
+    return true;
 
 }
 
@@ -353,13 +322,13 @@ export function validateContentInput(
    OWNERSHIP CHECK
 ========================================================= */
 
-export async function getOwnership(
+async function requireOwnership(
     db,
-    ownershipId
+    ownershipId,
+    userId
 ) {
 
     if (
-        typeof ownershipId !== "string" ||
         !ownershipId
     ) {
 
@@ -370,55 +339,12 @@ export async function getOwnership(
     }
 
 
-    const ownership =
-        await db.prepare(
-            `
-            SELECT
-                *
-            FROM pixel_ownership
-            WHERE id = ?
-              AND status = 'SOLD'
-            LIMIT 1
-            `
-        )
-        .bind(
-            ownershipId
-        )
-        .first();
-
-
-    if (!ownership) {
-
-        throw new Error(
-            "Permanent pixel ownership record was not found."
-        );
-
-    }
-
-
-    return ownership;
-
-}
-
-
-/* =========================================================
-   OWNER AUTHORIZATION
-========================================================= */
-
-export async function assertOwnershipOwner(
-    db,
-    {
-        ownershipId,
-        userId
-    }
-) {
-
     if (
         !userId
     ) {
 
         throw new Error(
-            "Authentication is required."
+            "Authentication required."
         );
 
     }
@@ -431,256 +357,56 @@ export async function assertOwnershipOwner(
         );
 
 
+    if (!ownership) {
+
+        const error =
+            new Error(
+                "Ownership record not found."
+            );
+
+
+        error.status =
+            404;
+
+
+        throw error;
+
+    }
+
+
+    if (
+        ownership.status !==
+        "SOLD"
+    ) {
+
+        throw new Error(
+            "Only permanently owned pixels can publish content."
+        );
+
+    }
+
+
     if (
         ownership.user_id !==
         userId
     ) {
 
-        throw new Error(
-            "You do not own this canvas area."
-        );
+        const error =
+            new Error(
+                "You do not own this pixel."
+            );
+
+
+        error.status =
+            403;
+
+
+        throw error;
 
     }
 
 
     return ownership;
-
-}
-
-
-/* =========================================================
-   ADULT CONTENT VALIDATION
-========================================================= */
-
-export async function validateAdultContent(
-    db,
-    {
-        ownershipId,
-        userId,
-        isAdultContent
-    }
-) {
-
-    const ownership =
-        await assertOwnershipOwner(
-            db,
-            {
-                ownershipId,
-                userId
-            }
-        );
-
-
-    const district =
-        getDistrictRule(
-            ownership.district_id
-        );
-
-
-    if (!district) {
-
-        throw new Error(
-            "Invalid district."
-        );
-
-    }
-
-
-    if (
-        isAdultContent !== true
-    ) {
-
-        return {
-
-            allowed:
-                true,
-
-            adult:
-                false
-
-        };
-
-    }
-
-
-    /*
-     * Adult content is restricted to the Adult District.
-     */
-
-    if (
-        !district.adultOnly
-    ) {
-
-        throw new Error(
-            "Adult content can only be published in the Adult District."
-        );
-
-    }
-
-
-    /*
-     * Check user age verification.
-     */
-
-    const user =
-        await db.prepare(
-            `
-            SELECT
-                id,
-                age_verified
-            FROM users
-            WHERE id = ?
-            LIMIT 1
-            `
-        )
-        .bind(
-            userId
-        )
-        .first();
-
-
-    if (!user) {
-
-        throw new Error(
-            "User account was not found."
-        );
-
-    }
-
-
-    if (
-        Number(
-            user.age_verified
-        ) !== 1
-    ) {
-
-        throw new Error(
-            "18+ age verification is required for Adult District content."
-        );
-
-    }
-
-
-    return {
-
-        allowed:
-            true,
-
-        adult:
-            true
-
-    };
-
-}
-
-
-/* =========================================================
-   PROHIBITED CONTENT CHECK
-========================================================= */
-
-export function validateProhibitedContent(
-    input
-) {
-
-    /*
-     * This is NOT intended to be the sole moderation system.
-     *
-     * Images and external links require additional moderation
-     * infrastructure.
-     *
-     * This layer prevents obvious prohibited declarations
-     * and establishes the server-side policy boundary.
-     */
-
-    const combinedText =
-        [
-            input.title,
-            input.description,
-            input.externalUrl
-        ]
-            .filter(Boolean)
-            .join(" ")
-            .toLowerCase();
-
-
-    /*
-     * The platform must never allow child sexual abuse
-     * material, sexual exploitation, trafficking or similar
-     * illegal material.
-     *
-     * Do not rely on keyword filtering alone in production.
-     * A proper moderation/review pipeline is required.
-     */
-
-    const prohibitedIndicators = [
-
-        "child sexual abuse material",
-
-        "csam",
-
-        "sexual exploitation of a minor",
-
-        "child sexual exploitation"
-
-    ];
-
-
-    for (
-        const indicator
-        of prohibitedIndicators
-    ) {
-
-        if (
-            combinedText.includes(
-                indicator
-            )
-        ) {
-
-            throw new Error(
-                "This content cannot be published."
-            );
-
-        }
-
-    }
-
-
-    return true;
-
-}
-
-
-/* =========================================================
-   YOUTH DISTRICT VALIDATION
-========================================================= */
-
-export function validateYouthContent(
-    districtId,
-    isAdultContent
-) {
-
-    if (
-        districtId !==
-        "youth"
-    ) {
-
-        return true;
-
-    }
-
-
-    if (
-        isAdultContent === true
-    ) {
-
-        throw new Error(
-            "Adult content cannot be published in the Youth District."
-        );
-
-    }
-
-
-    return true;
 
 }
 
@@ -699,61 +425,158 @@ export async function createContent(
 ) {
 
     const ownership =
-        await assertOwnershipOwner(
+        await requireOwnership(
             db,
-            {
-                ownershipId,
-                userId
-            }
+            ownershipId,
+            userId
         );
 
 
-    const validated =
-        validateContentInput(
-            content
+    if (
+        !content
+    ) {
+
+        throw new Error(
+            "Content data is required."
+        );
+
+    }
+
+
+    const contentType =
+        validateContentType(
+            content.contentType
         );
 
 
-    const isAdult =
+    const title =
+        cleanString(
+            content.title,
+            MAX_TITLE_LENGTH
+        );
+
+
+    const description =
+        cleanString(
+            content.description,
+            MAX_DESCRIPTION_LENGTH
+        );
+
+
+    const altText =
+        cleanString(
+            content.altText,
+            MAX_ALT_TEXT_LENGTH
+        );
+
+
+    const imageUrl =
+        validateUrl(
+            content.imageUrl
+        );
+
+
+    const externalUrl =
+        validateUrl(
+            content.externalUrl
+        );
+
+
+    const isAdultContent =
         content.isAdultContent === true;
 
 
-    validateYouthContent(
-        ownership.district_id,
-        isAdult
-    );
+    const district =
+        getDistrict(
+            ownership.district_id
+        );
 
 
-    await validateAdultContent(
-        db,
+    if (!district) {
+
+        throw new Error(
+            "Ownership district does not exist."
+        );
+
+    }
+
+
+    validateContentPolicy(
         {
-            ownershipId,
-            userId,
-            isAdultContent:
-                isAdult
+
+            contentType,
+
+            title,
+
+            description,
+
+            imageUrl,
+
+            externalUrl,
+
+            altText,
+
+            isAdultContent
+
+        },
+        district
+    );
+
+
+    /*
+     * Adult content requires age verification.
+     */
+
+    if (
+        isAdultContent
+    ) {
+
+        const user =
+            await db.prepare(
+                `
+                SELECT
+                    age_verified
+                FROM users
+                WHERE id = ?
+                LIMIT 1
+                `
+            )
+            .bind(
+                userId
+            )
+            .first();
+
+
+        if (
+            Number(
+                user?.age_verified
+            ) !== 1
+        ) {
+
+            const error =
+                new Error(
+                    "Age verification is required for Adult District content."
+                );
+
+
+            error.status =
+                403;
+
+
+            throw error;
+
         }
-    );
 
-
-    validateProhibitedContent(
-        validated
-    );
+    }
 
 
     const contentId =
         `content_${crypto.randomUUID()}`;
 
 
-    /*
-     * New content is initially stored as DRAFT.
-     *
-     * Publication can occur only after the platform's
-     * publication/moderation rules are satisfied.
-     */
-
     await db.prepare(
         `
-        INSERT INTO canvas_content (
+        INSERT INTO ownership_content (
 
             id,
 
@@ -814,24 +637,37 @@ export async function createContent(
 
         userId,
 
-        validated.contentType,
+        contentType,
 
-        validated.title,
+        title,
 
-        validated.description,
+        description,
 
-        validated.imageUrl,
+        imageUrl,
 
-        validated.externalUrl,
+        externalUrl,
 
-        validated.altText,
+        altText,
 
-        isAdult
-            ? 1
-            : 0
+        isAdultContent ? 1 : 0
 
     )
     .run();
+
+
+    await createContentEvent(
+        db,
+        {
+
+            contentId,
+
+            userId,
+
+            eventType:
+                "CREATED"
+
+        }
+    );
 
 
     return getContent(
@@ -851,13 +687,36 @@ export async function getContent(
     contentId
 ) {
 
+    if (
+        !contentId
+    ) {
+
+        return null;
+
+    }
+
+
     const content =
         await db.prepare(
             `
             SELECT
-                *
-            FROM canvas_content
-            WHERE id = ?
+
+                c.*,
+
+                d.name AS district_name,
+
+                d.adult_only
+
+            FROM ownership_content c
+
+            JOIN pixel_ownership po
+                ON po.id = c.ownership_id
+
+            JOIN districts d
+                ON d.id = po.district_id
+
+            WHERE c.id = ?
+
             LIMIT 1
             `
         )
@@ -867,13 +726,71 @@ export async function getContent(
         .first();
 
 
-    return content || null;
+    if (!content) {
+
+        return null;
+
+    }
+
+
+    /*
+     * Public response deliberately does not expose internal
+     * moderation/audit information.
+     */
+
+    return {
+
+        id:
+            content.id,
+
+        ownershipId:
+            content.ownership_id,
+
+        userId:
+            content.user_id,
+
+        contentType:
+            content.content_type,
+
+        title:
+            content.title,
+
+        description:
+            content.description,
+
+        imageUrl:
+            content.image_url,
+
+        externalUrl:
+            content.external_url,
+
+        altText:
+            content.alt_text,
+
+        isAdultContent:
+            Number(
+                content.is_adult_content
+            ) === 1,
+
+        status:
+            content.status,
+
+        district:
+            content.district_name,
+
+        createdAt:
+            content.created_at,
+
+        publishedAt:
+            content.published_at
+
+    };
 
 }
 
 
 /* =========================================================
-   LIST CONTENT FOR OWNERSHIP
+   LIST OWNERSHIP CONTENT
 ========================================================= */
 
 export async function listOwnershipContent(
@@ -881,21 +798,89 @@ export async function listOwnershipContent(
     ownershipId
 ) {
 
-    return db.prepare(
-        `
-        SELECT
-            *
-        FROM canvas_content
+    const rows =
+        await db.prepare(
+            `
+            SELECT
+                id,
+                ownership_id,
+                user_id,
+                content_type,
+                title,
+                description,
+                image_url,
+                external_url,
+                alt_text,
+                is_adult_content,
+                status,
+                created_at,
+                published_at
+            FROM ownership_content
+            WHERE ownership_id = ?
 
-        WHERE ownership_id = ?
+              AND status IN (
+                  'PUBLISHED',
+                  'HIDDEN'
+              )
 
-        ORDER BY created_at DESC
-        `
-    )
-    .bind(
-        ownershipId
-    )
-    .all();
+            ORDER BY created_at DESC
+            `
+        )
+        .bind(
+            ownershipId
+        )
+        .all();
+
+
+    return {
+
+        results:
+            (rows.results || [])
+                .map(
+                    row => ({
+
+                        id:
+                            row.id,
+
+                        ownershipId:
+                            row.ownership_id,
+
+                        contentType:
+                            row.content_type,
+
+                        title:
+                            row.title,
+
+                        description:
+                            row.description,
+
+                        imageUrl:
+                            row.image_url,
+
+                        externalUrl:
+                            row.external_url,
+
+                        altText:
+                            row.alt_text,
+
+                        isAdultContent:
+                            Number(
+                                row.is_adult_content
+                            ) === 1,
+
+                        status:
+                            row.status,
+
+                        createdAt:
+                            row.created_at,
+
+                        publishedAt:
+                            row.published_at
+
+                    })
+                )
+
+    };
 
 }
 
@@ -913,10 +898,19 @@ export async function publishContent(
 ) {
 
     const content =
-        await getContent(
-            db,
+        await db.prepare(
+            `
+            SELECT
+                *
+            FROM ownership_content
+            WHERE id = ?
+            LIMIT 1
+            `
+        )
+        .bind(
             contentId
-        );
+        )
+        .first();
 
 
     if (!content) {
@@ -928,15 +922,24 @@ export async function publishContent(
     }
 
 
-    await assertOwnershipOwner(
-        db,
-        {
-            ownershipId:
-                content.ownership_id,
+    if (
+        content.user_id !==
+        userId
+    ) {
 
-            userId
-        }
-    );
+        const error =
+            new Error(
+                "You cannot publish content you do not own."
+            );
+
+
+        error.status =
+            403;
+
+
+        throw error;
+
+    }
 
 
     if (
@@ -945,77 +948,128 @@ export async function publishContent(
     ) {
 
         throw new Error(
-            "Removed content cannot be republished."
+            "Removed content cannot be published."
+        );
+
+    }
+
+
+    const ownership =
+        await requireOwnership(
+            db,
+            content.ownership_id,
+            userId
+        );
+
+
+    const district =
+        getDistrict(
+            ownership.district_id
+        );
+
+
+    if (!district) {
+
+        throw new Error(
+            "District not found."
         );
 
     }
 
 
     /*
-     * Revalidate before publication.
+     * Adult content requires age verification at publication
+     * time as well.
      */
 
-    validateYouthContent(
-        content.district_id ||
-        (
-            await getOwnership(
-                db,
-                content.ownership_id
-            )
-        ).district_id,
-
+    if (
         Number(
             content.is_adult_content
         ) === 1
-    );
+    ) {
+
+        const user =
+            await db.prepare(
+                `
+                SELECT
+                    age_verified
+                FROM users
+                WHERE id = ?
+                LIMIT 1
+                `
+            )
+            .bind(
+                userId
+            )
+            .first();
 
 
-    /*
-     * Adult publication requires current verification.
-     */
+        if (
+            Number(
+                user?.age_verified
+            ) !== 1
+        ) {
 
-    await validateAdultContent(
-        db,
-        {
+            const error =
+                new Error(
+                    "Age verification is required."
+                );
 
-            ownershipId:
-                content.ownership_id,
 
-            userId,
+            error.status =
+                403;
 
-            isAdultContent:
-                Number(
-                    content.is_adult_content
-                ) === 1
+
+            throw error;
 
         }
-    );
+
+    }
 
 
     await db.prepare(
         `
-        UPDATE canvas_content
+        UPDATE ownership_content
 
         SET
 
             status =
                 'PUBLISHED',
 
+            published_at =
+                CURRENT_TIMESTAMP,
+
             updated_at =
                 CURRENT_TIMESTAMP
 
         WHERE id = ?
 
-          AND status IN (
-              'DRAFT',
-              'HIDDEN'
-          )
+          AND user_id = ?
+
+          AND status !=
+              'REMOVED'
         `
     )
     .bind(
-        contentId
+        contentId,
+        userId
     )
     .run();
+
+
+    await createContentEvent(
+        db,
+        {
+
+            contentId,
+
+            userId,
+
+            eventType:
+                "PUBLISHED"
+
+        }
+    );
 
 
     return getContent(
@@ -1039,10 +1093,19 @@ export async function hideContent(
 ) {
 
     const content =
-        await getContent(
-            db,
+        await db.prepare(
+            `
+            SELECT
+                *
+            FROM ownership_content
+            WHERE id = ?
+            LIMIT 1
+            `
+        )
+        .bind(
             contentId
-        );
+        )
+        .first();
 
 
     if (!content) {
@@ -1054,38 +1117,69 @@ export async function hideContent(
     }
 
 
-    await assertOwnershipOwner(
-        db,
-        {
-            ownershipId:
-                content.ownership_id,
+    if (
+        content.user_id !==
+        userId
+    ) {
 
-            userId
-        }
-    );
+        const error =
+            new Error(
+                "You cannot modify content you do not own."
+            );
+
+
+        error.status =
+            403;
+
+
+        throw error;
+
+    }
 
 
     await db.prepare(
         `
-        UPDATE canvas_content
+        UPDATE ownership_content
 
         SET
 
             status =
                 'HIDDEN',
 
+            hidden_at =
+                CURRENT_TIMESTAMP,
+
             updated_at =
                 CURRENT_TIMESTAMP
 
         WHERE id = ?
 
-          AND status != 'REMOVED'
+          AND user_id = ?
+
+          AND status !=
+              'REMOVED'
         `
     )
     .bind(
-        contentId
+        contentId,
+        userId
     )
     .run();
+
+
+    await createContentEvent(
+        db,
+        {
+
+            contentId,
+
+            userId,
+
+            eventType:
+                "HIDDEN"
+
+        }
+    );
 
 
     return getContent(
@@ -1111,37 +1205,55 @@ export async function reportContent(
 ) {
 
     const content =
-        await getContent(
-            db,
+        await db.prepare(
+            `
+            SELECT
+                id,
+                status
+            FROM ownership_content
+            WHERE id = ?
+            LIMIT 1
+            `
+        )
+        .bind(
             contentId
-        );
+        )
+        .first();
 
 
     if (!content) {
 
-        throw new Error(
-            "Content not found."
-        );
+        const error =
+            new Error(
+                "Content not found."
+            );
+
+
+        error.status =
+            404;
+
+
+        throw error;
 
     }
 
 
-    const cleanReason =
+    const normalizedReason =
         cleanString(
             reason,
-            500
+            200
         );
 
 
-    const cleanDetails =
+    const normalizedDetails =
         cleanString(
             details,
-            5000
+            2_000
         );
 
 
     if (
-        !cleanReason
+        !normalizedReason
     ) {
 
         throw new Error(
@@ -1198,18 +1310,33 @@ export async function reportContent(
 
         reporterUserId,
 
-        cleanReason,
+        normalizedReason,
 
-        cleanDetails
+        normalizedDetails
 
     )
     .run();
 
 
+    await createContentEvent(
+        db,
+        {
+
+            contentId,
+
+            userId:
+                reporterUserId,
+
+            eventType:
+                "REPORTED"
+
+        }
+    );
+
+
     return {
 
-        id:
-            reportId,
+        reportId,
 
         status:
             "OPEN"
@@ -1220,22 +1347,110 @@ export async function reportContent(
 
 
 /* =========================================================
-   REMOVE CONTENT
+   CREATE CONTENT EVENT
+========================================================= */
+
+async function createContentEvent(
+    db,
+    {
+        contentId,
+        userId,
+        eventType,
+        metadata = null
+    }
+) {
+
+    await db.prepare(
+        `
+        INSERT INTO content_events (
+
+            id,
+
+            content_id,
+
+            user_id,
+
+            event_type,
+
+            metadata_json
+
+        )
+
+        VALUES (
+
+            ?,
+
+            ?,
+
+            ?,
+
+            ?,
+
+            ?
+
+        )
+        `
+    )
+    .bind(
+
+        `event_${crypto.randomUUID()}`,
+
+        contentId,
+
+        userId || null,
+
+        eventType,
+
+        metadata
+            ? JSON.stringify(
+                metadata
+            )
+            : null
+
+    )
+    .run();
+
+}
+
+
+/* =========================================================
+   MODERATION REMOVE
 ========================================================= */
 
 export async function removeContent(
     db,
     {
         contentId,
+        moderatorUserId,
         reason
     }
 ) {
 
-    const content =
-        await getContent(
-            db,
-            contentId
+    if (
+        !moderatorUserId
+    ) {
+
+        throw new Error(
+            "Moderator authentication is required."
         );
+
+    }
+
+
+    const content =
+        await db.prepare(
+            `
+            SELECT
+                *
+            FROM ownership_content
+            WHERE id = ?
+            LIMIT 1
+            `
+        )
+        .bind(
+            contentId
+        )
+        .first();
 
 
     if (!content) {
@@ -1249,7 +1464,7 @@ export async function removeContent(
 
     await db.prepare(
         `
-        UPDATE canvas_content
+        UPDATE ownership_content
 
         SET
 
@@ -1268,89 +1483,82 @@ export async function removeContent(
     .run();
 
 
-    /*
-     * The ownership itself remains permanent.
-     *
-     * Removing content does NOT return pixels to inventory.
-     */
+    await db.prepare(
+        `
+        INSERT INTO moderation_actions (
+
+            id,
+
+            content_id,
+
+            ownership_id,
+
+            moderator_user_id,
+
+            action,
+
+            reason
+
+        )
+
+        VALUES (
+
+            ?,
+
+            ?,
+
+            ?,
+
+            ?,
+
+            'REMOVE_CONTENT',
+
+            ?
+
+        )
+        `
+    )
+    .bind(
+
+        `moderation_${crypto.randomUUID()}`,
+
+        contentId,
+
+        content.ownership_id,
+
+        moderatorUserId,
+
+        cleanString(
+            reason,
+            1_000
+        )
+
+    )
+    .run();
+
+
+    await createContentEvent(
+        db,
+        {
+
+            contentId,
+
+            userId:
+                moderatorUserId,
+
+            eventType:
+                "MODERATION_REMOVED"
+
+        }
+    );
+
 
     return {
 
         contentId,
 
         status:
-            "REMOVED",
-
-        reason:
-            cleanString(
-                reason,
-                1000
-            )
-
-    };
-
-}
-
-
-/* =========================================================
-   CONTENT SUMMARY
-========================================================= */
-
-export async function getContentSummary(
-    db,
-    ownershipId
-) {
-
-    const result =
-        await db.prepare(
-            `
-            SELECT
-
-                COUNT(*) AS total,
-
-                SUM(
-                    CASE
-                        WHEN status = 'PUBLISHED'
-                        THEN 1
-                        ELSE 0
-                    END
-                ) AS published,
-
-                SUM(
-                    CASE
-                        WHEN status = 'REMOVED'
-                        THEN 1
-                        ELSE 0
-                    END
-                ) AS removed
-
-            FROM canvas_content
-
-            WHERE ownership_id = ?
-            `
-        )
-        .bind(
-            ownershipId
-        )
-        .first();
-
-
-    return {
-
-        total:
-            Number(
-                result?.total || 0
-            ),
-
-        published:
-            Number(
-                result?.published || 0
-            ),
-
-        removed:
-            Number(
-                result?.removed || 0
-            )
+            "REMOVED"
 
     };
 
@@ -1363,6 +1571,20 @@ export async function getContentSummary(
 
 export {
 
-    DISTRICT_RULES
+    ALLOWED_CONTENT_TYPES,
+
+    createContent,
+
+    getContent,
+
+    listOwnershipContent,
+
+    publishContent,
+
+    hideContent,
+
+    reportContent,
+
+    removeContent
 
 };
