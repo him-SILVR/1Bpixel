@@ -1,1463 +1,179 @@
-/**
- * =========================================================
- * BILLION PIXEL CANVAS
- * Pixel Allocation Engine
- * =========================================================
- *
- * Responsibilities:
- *
- * 1. Validate purchase quantity.
- * 2. Validate district.
- * 3. Find an available rectangular region.
- * 4. Prevent overlap with existing reservations/ownership.
- * 5. Create temporary reservations.
- * 6. Convert reservations into permanent ownership.
- *
- * IMPORTANT:
- *
- * This module is intended to run server-side.
- *
- * The browser must NEVER be allowed to directly create
- * pixel_ownership records.
- * =========================================================
- */
-
 "use strict";
 
 import {
+    CANVAS_WIDTH,
+    CANVAS_HEIGHT,
+    TOTAL_PIXELS,
+    coordinateToPixelId,
+    pixelIdToCoordinate,
     getDistrict,
-    getDistrictCapacity,
-    validateRectangle,
-    rectangleArea,
-    createRectangle
+    getDistrictAtCoordinate,
+    validatePixelId,
+    validateCoordinate
 } from "./coordinates.js";
 
 
 /* =========================================================
-   CONSTANTS
+   BILLION PIXEL CANVAS
+   PIXEL ALLOCATION ENGINE
 ========================================================= */
 
-export const RESERVATION_MINUTES = 15;
+
+/*
+ * IMPORTANT:
+ *
+ * Empty pixels do not need database rows.
+ *
+ * A pixel is considered:
+ *
+ * AVAILABLE
+ *     if it has never been sold/reserved.
+ *
+ * RESERVED
+ *     if it is temporarily attached to an unpaid order.
+ *
+ * SOLD
+ *     if permanent ownership has been created.
+ *
+ * This dramatically reduces database storage.
+ */
 
 
 /* =========================================================
-   TIME HELPERS
+   PIXEL STATE
 ========================================================= */
 
-export function getExpirationDate(
-    minutes = RESERVATION_MINUTES
+export const PIXEL_STATE = Object.freeze({
+
+    AVAILABLE:
+        "AVAILABLE",
+
+    RESERVED:
+        "RESERVED",
+
+    SOLD:
+        "SOLD"
+
+});
+
+
+/* =========================================================
+   GET PIXEL STATE
+========================================================= */
+
+export async function getPixelState(
+    db,
+    pixelId
 ) {
 
-    const date =
-        new Date();
-
-    date.setMinutes(
-        date.getMinutes() +
-        minutes
+    validatePixelId(
+        Number(pixelId)
     );
 
-    return date.toISOString();
 
-}
+    const id =
+        Number(pixelId);
 
 
-/* =========================================================
-   UUID
-========================================================= */
-
-export function createId(
-    prefix
-) {
-
-    return `${prefix}_${crypto.randomUUID()}`;
-
-}
-
-
-/* =========================================================
-   DATE COMPARISON
-========================================================= */
-
-export function isExpired(
-    isoDate
-) {
-
-    if (!isoDate) {
-
-        return true;
-
-    }
-
-    return (
-        new Date(isoDate).getTime() <=
-        Date.now()
-    );
-
-}
-
-
-/* =========================================================
-   QUANTITY VALIDATION
-========================================================= */
-
-export function validatePurchaseQuantity(
-    quantity,
-    district
-) {
-
-    if (
-        !Number.isSafeInteger(
-            quantity
-        )
-    ) {
-
-        return {
-            valid: false,
-            error:
-                "Quantity must be a whole number."
-        };
-
-    }
-
-
-    if (
-        quantity <= 0
-    ) {
-
-        return {
-            valid: false,
-            error:
-                "Quantity must be at least 1."
-        };
-
-    }
-
-
-    if (
-        quantity <
-        district.minimumPurchasePixels
-    ) {
-
-        return {
-            valid: false,
-            error:
-                `${district.name} requires at least ` +
-                `${district.minimumPurchasePixels.toLocaleString()} pixels.`
-        };
-
-    }
-
-
-    if (
-        quantity >
-        getDistrictCapacity(
-            district
-        )
-    ) {
-
-        return {
-            valid: false,
-            error:
-                "Requested quantity exceeds the district capacity."
-        };
-
-    }
-
-
-    return {
-        valid: true
-    };
-
-}
-
-
-/* =========================================================
-   RECTANGLE OVERLAP SQL CONDITION
-========================================================= */
-
-function overlapCondition() {
-
-    /*
-     * Two rectangles overlap if neither is completely
-     * to the left/right/above/below the other.
-     */
-
-    return `
-        x_start < :candidate_right
-        AND
-        x_start + width > :candidate_left
-
-        AND
-
-        y_start < :candidate_bottom
-        AND
-        y_start + height > :candidate_top
-    `;
-
-}
-
-
-/* =========================================================
-   CHECK RESERVED/OWNED OVERLAP
-========================================================= */
-
-async function hasOverlap(
-    db,
-    districtId,
-    rectangle
-) {
-
-    const candidateLeft =
-        rectangle.x;
-
-    const candidateTop =
-        rectangle.y;
-
-    const candidateRight =
-        rectangle.x +
-        rectangle.width;
-
-    const candidateBottom =
-        rectangle.y +
-        rectangle.height;
-
-
-    /*
-     * Check permanent ownership.
-     */
-
-    const ownership =
-        await db.prepare(
-            `
-            SELECT id
-            FROM pixel_ownership
-            WHERE district_id = :district_id
-              AND status = 'SOLD'
-              AND
-              ${overlapCondition()}
-            LIMIT 1
-            `
-        )
-        .bind({
-
-            district_id:
-                districtId,
-
-            candidate_left:
-                candidateLeft,
-
-            candidate_top:
-                candidateTop,
-
-            candidate_right:
-                candidateRight,
-
-            candidate_bottom:
-                candidateBottom
-
-        })
-        .first();
-
-
-    if (ownership) {
-
-        return true;
-
-    }
-
-
-    /*
-     * Check active reservations.
-     *
-     * Expired reservations are ignored by time.
-     */
-
-    const reservation =
-        await db.prepare(
-            `
-            SELECT id
-            FROM pixel_reservations
-            WHERE district_id = :district_id
-              AND status = 'ACTIVE'
-              AND expires_at > CURRENT_TIMESTAMP
-              AND
-              ${overlapCondition()}
-            LIMIT 1
-            `
-        )
-        .bind({
-
-            district_id:
-                districtId,
-
-            candidate_left:
-                candidateLeft,
-
-            candidate_top:
-                candidateTop,
-
-            candidate_right:
-                candidateRight,
-
-            candidate_bottom:
-                candidateBottom
-
-        })
-        .first();
-
-
-    if (reservation) {
-
-        return true;
-
-    }
-
-
-    return false;
-
-}
-
-
-/* =========================================================
-   FIND AVAILABLE RECTANGLE
-========================================================= */
-
-export async function findAvailableRectangle(
-    db,
-    districtId,
-    quantity
-) {
-
-    const district =
-        getDistrict(
-            districtId
-        );
-
-
-    const quantityValidation =
-        validatePurchaseQuantity(
-            quantity,
-            district
-        );
-
-
-    if (
-        !quantityValidation.valid
-    ) {
-
-        throw new Error(
-            quantityValidation.error
-        );
-
-    }
-
-
-    /*
-     * We need a rectangle containing at least `quantity`
-     * pixels.
-     *
-     * Start with shapes that fit naturally into the district.
-     */
-
-    const possibleShapes =
-        generateCandidateShapes(
-            quantity,
-            district
-        );
-
-
-    for (
-        const shape
-        of possibleShapes
-    ) {
-
-        /*
-         * Scan using a deterministic grid.
-         *
-         * This is the initial allocator.
-         *
-         * For a very large production canvas, this should
-         * eventually be replaced by a spatial index / free-space
-         * allocator to avoid excessive scanning.
-         */
-
-        const maxX =
-            district.x +
-            district.width -
-            shape.width;
-
-        const maxY =
-            district.y +
-            district.height -
-            shape.height;
-
-
-        const step =
-            Math.max(
-                1,
-                Math.floor(
-                    Math.sqrt(
-                        quantity
-                    )
-                )
-            );
-
-
-        for (
-            let y =
-                district.y;
-            y <= maxY;
-            y += step
-        ) {
-
-            for (
-                let x =
-                    district.x;
-                x <= maxX;
-                x += step
-            ) {
-
-                const rectangle = {
-
-                    x,
-
-                    y,
-
-                    width:
-                        shape.width,
-
-                    height:
-                        shape.height
-
-                };
-
-
-                const validation =
-                    validateRectangle(
-                        rectangle,
-                        districtId
-                    );
-
-
-                if (
-                    !validation.valid
-                ) {
-
-                    continue;
-
-                }
-
-
-                /*
-                 * The rectangle may contain more pixels than
-                 * requested if the shape is larger.
-                 *
-                 * We only generate exact shapes in the normal
-                 * path, so this should equal quantity.
-                 */
-
-                if (
-                    validation.pixelCount <
-                    quantity
-                ) {
-
-                    continue;
-
-                }
-
-
-                const overlap =
-                    await hasOverlap(
-                        db,
-                        districtId,
-                        rectangle
-                    );
-
-
-                if (
-                    !overlap
-                ) {
-
-                    return {
-
-                        ...rectangle,
-
-                        pixelCount:
-                            validation.pixelCount
-
-                    };
-
-                }
-
-            }
-
-        }
-
-    }
-
-
-    /*
-     * If no simple rectangle was found, try a more complete
-     * row-based search.
-     */
-
-    const fallback =
-        await findRowBasedRectangle(
-            db,
-            districtId,
-            quantity
-        );
-
-
-    if (fallback) {
-
-        return fallback;
-
-    }
-
-
-    throw new Error(
-        "No contiguous pixel block of the requested size is currently available."
-    );
-
-}
-
-
-/* =========================================================
-   CANDIDATE SHAPES
-========================================================= */
-
-function generateCandidateShapes(
-    quantity,
-    district
-) {
-
-    const shapes = [];
-
-
-    /*
-     * Perfect square.
-     */
-
-    const square =
-        Math.floor(
-            Math.sqrt(
-                quantity
-            )
-        );
-
-
-    if (
-        square *
-        square ===
-        quantity
-    ) {
-
-        shapes.push({
-
-            width:
-                square,
-
-            height:
-                square
-
-        });
-
-    }
-
-
-    /*
-     * Try factor pairs.
-     */
-
-    for (
-        let width = 1;
-        width <= Math.sqrt(quantity);
-        width++
-    ) {
-
-        if (
-            quantity %
-            width !==
-            0
-        ) {
-
-            continue;
-
-        }
-
-
-        const height =
-            quantity /
-            width;
-
-
-        if (
-            width <=
-            district.width &&
-            height <=
-            district.height
-        ) {
-
-            shapes.push({
-
-                width,
-
-                height
-
-            });
-
-
-            if (
-                width !== height
-            ) {
-
-                shapes.push({
-
-                    width:
-                        height,
-
-                    height:
-                        width
-
-                });
-
-            }
-
-        }
-
-    }
-
-
-    /*
-     * If the number isn't factorizable into a convenient
-     * rectangle, use a single-row rectangle when possible.
-     */
-
-    if (
-        quantity <=
-        district.width
-    ) {
-
-        shapes.push({
-
-            width:
-                quantity,
-
-            height:
-                1
-
-        });
-
-    }
-
-
-    /*
-     * Use the full district width as a final candidate.
-     */
-
-    if (
-        district.width > 0
-    ) {
-
-        const height =
-            Math.ceil(
-                quantity /
-                district.width
-            );
-
-
-        if (
-            height <=
-            district.height
-        ) {
-
-            /*
-             * This can be larger than the requested quantity.
-             * Only add it when it is exact.
-             */
-
-            if (
-                district.width *
-                height ===
-                quantity
-            ) {
-
-                shapes.push({
-
-                    width:
-                        district.width,
-
-                    height
-
-                });
-
-            }
-
-        }
-
-    }
-
-
-    /*
-     * Remove duplicate shapes.
-     */
-
-    const unique =
-        new Map();
-
-
-    for (
-        const shape
-        of shapes
-    ) {
-
-        const key =
-            `${shape.width}x${shape.height}`;
-
-        unique.set(
-            key,
-            shape
-        );
-
-    }
-
-
-    return [
-        ...unique.values()
-    ];
-
-}
-
-
-/* =========================================================
-   ROW-BASED FALLBACK
-========================================================= */
-
-async function findRowBasedRectangle(
-    db,
-    districtId,
-    quantity
-) {
-
-    const district =
-        getDistrict(
-            districtId
-        );
-
-
-    const width =
-        Math.min(
-            district.width,
-            quantity
-        );
-
-
-    const height =
-        Math.ceil(
-            quantity /
-            width
-        );
-
-
-    if (
-        height >
-        district.height
-    ) {
-
-        return null;
-
-    }
-
-
-    const maxX =
-        district.x +
-        district.width -
-        width;
-
-    const maxY =
-        district.y +
-        district.height -
-        height;
-
-
-    /*
-     * Deterministic scan.
-     */
-
-    for (
-        let y =
-            district.y;
-        y <= maxY;
-        y++
-    ) {
-
-        for (
-            let x =
-                district.x;
-            x <= maxX;
-            x++
-        ) {
-
-            const rectangle = {
-
-                x,
-
-                y,
-
-                width,
-
-                height
-
-            };
-
-
-            const validation =
-                validateRectangle(
-                    rectangle,
-                    districtId
-                );
-
-
-            if (
-                !validation.valid
-            ) {
-
-                continue;
-
-            }
-
-
-            /*
-             * Do not allocate extra pixels.
-             */
-
-            if (
-                validation.pixelCount !==
-                quantity
-            ) {
-
-                continue;
-
-            }
-
-
-            const overlap =
-                await hasOverlap(
-                    db,
-                    districtId,
-                    rectangle
-                );
-
-
-            if (
-                !overlap
-            ) {
-
-                return {
-
-                    ...rectangle,
-
-                    pixelCount:
-                        quantity
-
-                };
-
-            }
-
-        }
-
-    }
-
-
-    return null;
-
-}
-
-
-/* =========================================================
-   CREATE RESERVATION
-========================================================= */
-
-export async function createReservation(
-    db,
-    {
-        orderId,
-        userId = null,
-        districtId,
-        quantity
-    }
-) {
-
-    const district =
-        getDistrict(
-            districtId
-        );
-
-
-    const validation =
-        validatePurchaseQuantity(
-            quantity,
-            district
-        );
-
-
-    if (
-        !validation.valid
-    ) {
-
-        throw new Error(
-            validation.error
-        );
-
-    }
-
-
-    /*
-     * Find available space.
-     */
-
-    const rectangle =
-        await findAvailableRectangle(
-            db,
-            districtId,
-            quantity
-        );
-
-
-    /*
-     * IMPORTANT:
-     *
-     * The caller must execute this operation inside an
-     * appropriate database transaction/serialization strategy.
-     *
-     * The reservation itself is not proof of ownership.
-     */
-
-    const reservationId =
-        createId(
-            "res"
-        );
-
-
-    const expiresAt =
-        getExpirationDate();
-
-
-    await db.prepare(
-        `
-        INSERT INTO pixel_reservations (
-
-            id,
-
-            order_id,
-
-            district_id,
-
-            x_start,
-
-            y_start,
-
-            width,
-
-            height,
-
-            pixel_count,
-
-            expires_at,
-
-            status
-
-        )
-
-        VALUES (
-
-            :id,
-
-            :order_id,
-
-            :district_id,
-
-            :x_start,
-
-            :y_start,
-
-            :width,
-
-            :height,
-
-            :pixel_count,
-
-            :expires_at,
-
-            'ACTIVE'
-
-        )
-        `
-    )
-    .bind({
-
-        id:
-            reservationId,
-
-        order_id:
-            orderId,
-
-        district_id:
-            districtId,
-
-        x_start:
-            rectangle.x,
-
-        y_start:
-            rectangle.y,
-
-        width:
-            rectangle.width,
-
-        height:
-            rectangle.height,
-
-        pixel_count:
-            rectangle.pixelCount,
-
-        expires_at:
-            expiresAt
-
-    })
-    .run();
-
-
-    return {
-
-        id:
-            reservationId,
-
-        orderId,
-
-        userId,
-
-        districtId,
-
-        x:
-            rectangle.x,
-
-        y:
-            rectangle.y,
-
-        width:
-            rectangle.width,
-
-        height:
-            rectangle.height,
-
-        pixelCount:
-            rectangle.pixelCount,
-
-        expiresAt
-
-    };
-
-}
-
-
-/* =========================================================
-   GET RESERVATION
-========================================================= */
-
-export async function getReservation(
-    db,
-    reservationId
-) {
-
-    return db.prepare(
-        `
-        SELECT
-            *
-        FROM pixel_reservations
-        WHERE id = ?
-        LIMIT 1
-        `
-    )
-    .bind(
-        reservationId
-    )
-    .first();
-
-}
-
-
-/* =========================================================
-   CONVERT RESERVATION TO OWNERSHIP
-========================================================= */
-
-export async function finalizeOwnership(
-    db,
-    {
-        reservationId
-    }
-) {
-
-    const reservation =
-        await getReservation(
-            db,
-            reservationId
-        );
-
-
-    if (!reservation) {
-
-        throw new Error(
-            "Reservation not found."
-        );
-
-    }
-
-
-    if (
-        reservation.status !==
-        "ACTIVE"
-    ) {
-
-        throw new Error(
-            "Reservation is no longer active."
-        );
-
-    }
-
-
-    if (
-        isExpired(
-            reservation.expires_at
-        )
-    ) {
-
-        await db.prepare(
-            `
-            UPDATE pixel_reservations
-            SET status = 'EXPIRED'
-            WHERE id = ?
-              AND status = 'ACTIVE'
-            `
-        )
-        .bind(
-            reservationId
-        )
-        .run();
-
-
-        throw new Error(
-            "Reservation has expired."
-        );
-
-    }
-
-
-    /*
-     * Verify that the reservation still does not overlap
-     * permanent ownership.
-     */
-
-    const overlap =
-        await hasOverlap(
-            db,
-            reservation.district_id,
-            {
-
-                x:
-                    reservation.x_start,
-
-                y:
-                    reservation.y_start,
-
-                width:
-                    reservation.width,
-
-                height:
-                    reservation.height
-
-            }
-        );
-
-
-    /*
-     * hasOverlap includes active reservations, including
-     * this reservation itself, so we need a direct ownership
-     * check here instead.
-     */
-
-    const ownershipOverlap =
-        await db.prepare(
-            `
-            SELECT id
-            FROM pixel_ownership
-            WHERE district_id = ?
-              AND status = 'SOLD'
-
-              AND x_start < ?
-              AND x_start + width > ?
-
-              AND y_start < ?
-              AND y_start + height > ?
-
-            LIMIT 1
-            `
-        )
-        .bind(
-
-            reservation.district_id,
-
-            reservation.x_start +
-                reservation.width,
-
-            reservation.x_start,
-
-            reservation.y_start +
-                reservation.height,
-
-            reservation.y_start
-
-        )
-        .first();
-
-
-    if (
-        ownershipOverlap
-    ) {
-
-        throw new Error(
-            "The reserved region has already been sold."
-        );
-
-    }
-
-
-    /*
-     * Create permanent ownership record.
-     */
-
-    const ownershipId =
-        createId(
-            "own"
-        );
-
-
-    const order =
+    const row =
         await db.prepare(
             `
             SELECT
-                user_id,
-                price_usd
-            FROM orders
-            WHERE id = ?
+                pixel_id,
+                district_id,
+                x,
+                y,
+                status,
+                owner_user_id,
+                reservation_order_id,
+                sold_order_id
+            FROM canvas_pixels
+            WHERE pixel_id = ?
             LIMIT 1
             `
         )
         .bind(
-            reservation.order_id
+            id
         )
         .first();
 
 
-    if (!order) {
+    /*
+     * No physical database row means the pixel has never
+     * been reserved or sold.
+     */
 
-        throw new Error(
-            "Associated order was not found."
-        );
+    if (!row) {
+
+        const coordinate =
+            pixelIdToCoordinate(
+                id
+            );
+
+
+        const district =
+            getDistrictAtCoordinate(
+                coordinate.x,
+                coordinate.y
+            );
+
+
+        return {
+
+            pixelId:
+                id,
+
+            x:
+                coordinate.x,
+
+            y:
+                coordinate.y,
+
+            districtId:
+                district?.id || null,
+
+            status:
+                PIXEL_STATE.AVAILABLE,
+
+            ownerUserId:
+                null,
+
+            reservationOrderId:
+                null,
+
+            soldOrderId:
+                null
+
+        };
 
     }
 
 
-    await db.prepare(
-        `
-        INSERT INTO pixel_ownership (
-
-            id,
-
-            order_id,
-
-            user_id,
-
-            district_id,
-
-            x_start,
-
-            y_start,
-
-            width,
-
-            height,
-
-            pixel_count,
-
-            price_usd,
-
-            status
-
-        )
-
-        VALUES (
-
-            ?,
-
-            ?,
-
-            ?,
-
-            ?,
-
-            ?,
-
-            ?,
-
-            ?,
-
-            ?,
-
-            ?,
-
-            ?,
-
-            'SOLD'
-
-        )
-        `
-    )
-    .bind(
-
-        ownershipId,
-
-        reservation.order_id,
-
-        order.user_id || null,
-
-        reservation.district_id,
-
-        reservation.x_start,
-
-        reservation.y_start,
-
-        reservation.width,
-
-        reservation.height,
-
-        reservation.pixel_count,
-
-        order.price_usd
-
-    )
-    .run();
-
-
-    /*
-     * Permanently consume the reservation.
-     */
-
-    await db.prepare(
-        `
-        UPDATE pixel_reservations
-
-        SET status = 'CONVERTED'
-
-        WHERE id = ?
-
-          AND status = 'ACTIVE'
-        `
-    )
-    .bind(
-        reservationId
-    )
-    .run();
-
-
-    /*
-     * Mark order complete.
-     */
-
-    await db.prepare(
-        `
-        UPDATE orders
-
-        SET
-            status = 'COMPLETED',
-            updated_at = CURRENT_TIMESTAMP
-
-        WHERE id = ?
-
-          AND status IN (
-              'RESERVED',
-              'PAYMENT_DETECTED',
-              'CONFIRMING',
-              'PAID'
-          )
-        `
-    )
-    .bind(
-        reservation.order_id
-    )
-    .run();
-
-
     return {
 
-        ownershipId,
-
-        orderId:
-            reservation.order_id,
-
-        districtId:
-            reservation.district_id,
+        pixelId:
+            row.pixel_id,
 
         x:
-            reservation.x_start,
+            row.x,
 
         y:
-            reservation.y_start,
+            row.y,
 
-        width:
-            reservation.width,
-
-        height:
-            reservation.height,
-
-        pixelCount:
-            reservation.pixel_count,
+        districtId:
+            row.district_id,
 
         status:
-            "SOLD"
+            row.status,
 
-    };
+        ownerUserId:
+            row.owner_user_id,
 
-}
+        reservationOrderId:
+            row.reservation_order_id,
 
-
-/* =========================================================
-   EXPIRE OLD RESERVATIONS
-========================================================= */
-
-export async function expireReservations(
-    db
-) {
-
-    const result =
-        await db.prepare(
-            `
-            UPDATE pixel_reservations
-
-            SET status = 'EXPIRED'
-
-            WHERE status = 'ACTIVE'
-
-              AND expires_at <= CURRENT_TIMESTAMP
-            `
-        )
-        .run();
-
-
-    return {
-
-        expired:
-            result.meta?.changes || 0
+        soldOrderId:
+            row.sold_order_id
 
     };
 
@@ -1475,80 +191,1214 @@ export async function findOwnershipAt(
     y
 ) {
 
-    return db.prepare(
-        `
-        SELECT
-            po.*,
-            u.username,
-            u.display_name
+    const coordinateX =
+        Number(x);
 
-        FROM pixel_ownership po
+    const coordinateY =
+        Number(y);
 
-        LEFT JOIN users u
-            ON u.id = po.user_id
 
-        WHERE po.district_id = ?
+    validateCoordinate(
+        coordinateX,
+        coordinateY
+    );
 
-          AND po.status = 'SOLD'
 
-          AND po.x_start <= ?
-          AND po.x_start + po.width > ?
+    const district =
+        getDistrictAtCoordinate(
+            coordinateX,
+            coordinateY
+        );
 
-          AND po.y_start <= ?
-          AND po.y_start + po.height > ?
 
-        LIMIT 1
-        `
-    )
-    .bind(
+    if (
+        !district ||
+        district.id !== districtId
+    ) {
 
-        districtId,
+        return null;
 
-        x,
-        x,
+    }
 
-        y,
-        y
 
-    )
-    .first();
+    const pixelId =
+        coordinateToPixelId(
+            coordinateX,
+            coordinateY
+        );
+
+
+    const ownership =
+        await db.prepare(
+            `
+            SELECT
+                id,
+                user_id,
+                order_id,
+                pixel_id,
+                district_id,
+                x,
+                y,
+                status,
+                created_at
+            FROM pixel_ownership
+            WHERE pixel_id = ?
+              AND status = 'SOLD'
+            LIMIT 1
+            `
+        )
+        .bind(
+            pixelId
+        )
+        .first();
+
+
+    return ownership || null;
 
 }
 
 
 /* =========================================================
-   GET DISTRICT SOLD TOTAL
+   GET OWNERSHIP
 ========================================================= */
 
-export async function getDistrictSoldPixels(
+export async function getOwnership(
     db,
-    districtId
+    ownershipId
+) {
+
+    if (
+        typeof ownershipId !==
+        "string" ||
+        !ownershipId.trim()
+    ) {
+
+        throw new Error(
+            "Ownership ID is required."
+        );
+
+    }
+
+
+    const ownership =
+        await db.prepare(
+            `
+            SELECT
+                po.id,
+                po.user_id,
+                po.order_id,
+                po.pixel_id,
+                po.district_id,
+                po.x,
+                po.y,
+                po.status,
+                po.created_at,
+                d.name AS district_name
+            FROM pixel_ownership po
+            LEFT JOIN districts d
+                ON d.id = po.district_id
+            WHERE po.id = ?
+            LIMIT 1
+            `
+        )
+        .bind(
+            ownershipId
+        )
+        .first();
+
+
+    if (!ownership) {
+
+        return null;
+
+    }
+
+
+    return ownership;
+
+}
+
+
+/* =========================================================
+   CHECK PIXEL IS AVAILABLE
+========================================================= */
+
+export async function isPixelAvailable(
+    db,
+    pixelId
+) {
+
+    const state =
+        await getPixelState(
+            db,
+            pixelId
+        );
+
+
+    return (
+        state.status ===
+        PIXEL_STATE.AVAILABLE
+    );
+
+}
+
+
+/* =========================================================
+   GET AVAILABLE PIXEL
+========================================================= */
+
+export async function getNextAvailablePixel(
+    db,
+    districtId,
+    startPixelId = 0
+) {
+
+    const district =
+        getDistrict(
+            districtId
+        );
+
+
+    if (!district) {
+
+        throw new Error(
+            "District not found."
+        );
+
+    }
+
+
+    const start =
+        Number(
+            startPixelId
+        );
+
+
+    if (
+        !Number.isSafeInteger(
+            start
+        )
+    ) {
+
+        throw new Error(
+            "Invalid starting pixel."
+        );
+
+    }
+
+
+    /*
+     * We search the logical coordinate space rather than
+     * requiring every available pixel to exist in D1.
+     *
+     * For production, sold/reserved pixels are skipped using
+     * the database lookup.
+     */
+
+    const districtStart =
+        coordinateToPixelId(
+            district.x,
+            district.y
+        );
+
+
+    const districtEnd =
+        coordinateToPixelId(
+
+            district.x +
+                district.width -
+                1,
+
+            district.y +
+                district.height -
+                1
+
+        );
+
+
+    let candidate =
+        Math.max(
+            start,
+            districtStart
+        );
+
+
+    /*
+     * Prevent scanning outside the district.
+     */
+
+    while (
+        candidate <=
+        districtEnd
+    ) {
+
+        const coordinate =
+            pixelIdToCoordinate(
+                candidate
+            );
+
+
+        if (
+            coordinate.x <
+                district.x ||
+            coordinate.x >=
+                district.x +
+                    district.width ||
+            coordinate.y <
+                district.y ||
+            coordinate.y >=
+                district.y +
+                    district.height
+        ) {
+
+            candidate++;
+
+            continue;
+
+        }
+
+
+        const state =
+            await getPixelState(
+                db,
+                candidate
+            );
+
+
+        if (
+            state.status ===
+            PIXEL_STATE.AVAILABLE
+        ) {
+
+            return state;
+
+        }
+
+
+        candidate++;
+
+    }
+
+
+    return null;
+
+}
+
+
+/* =========================================================
+   GET AVAILABLE PIXELS
+========================================================= */
+
+export async function getAvailablePixels(
+    db,
+    districtId,
+    quantity,
+    startPixelId = 0
+) {
+
+    const amount =
+        Number(
+            quantity
+        );
+
+
+    if (
+        !Number.isSafeInteger(
+            amount
+        ) ||
+        amount < 1
+    ) {
+
+        throw new Error(
+            "Quantity must be at least 1."
+        );
+
+    }
+
+
+    const result = [];
+
+
+    let cursor =
+        Number(
+            startPixelId
+        );
+
+
+    /*
+     * Continue until enough available pixels are found.
+     */
+
+    while (
+        result.length <
+            amount
+    ) {
+
+        const pixel =
+            await getNextAvailablePixel(
+                db,
+                districtId,
+                cursor
+            );
+
+
+        if (!pixel) {
+
+            break;
+
+        }
+
+
+        result.push(
+            pixel
+        );
+
+
+        cursor =
+            pixel.pixelId +
+            1;
+
+    }
+
+
+    return result;
+
+}
+
+
+/* =========================================================
+   RESERVE ONE PIXEL
+========================================================= */
+
+export async function reservePixel(
+    db,
+    {
+        pixelId,
+        orderId,
+        userId
+    }
+) {
+
+    const id =
+        Number(
+            pixelId
+        );
+
+
+    validatePixelId(
+        id
+    );
+
+
+    if (!orderId) {
+
+        throw new Error(
+            "Order ID is required."
+        );
+
+    }
+
+
+    if (!userId) {
+
+        throw new Error(
+            "User ID is required."
+        );
+
+    }
+
+
+    const coordinate =
+        pixelIdToCoordinate(
+            id
+        );
+
+
+    const district =
+        getDistrictAtCoordinate(
+            coordinate.x,
+            coordinate.y
+        );
+
+
+    if (!district) {
+
+        throw new Error(
+            "Pixel does not belong to a valid district."
+        );
+
+    }
+
+
+    /*
+     * First try to create the row.
+     *
+     * This works because empty pixels have no row.
+     */
+
+    try {
+
+        await db.prepare(
+            `
+            INSERT INTO canvas_pixels (
+
+                pixel_id,
+                district_id,
+                x,
+                y,
+                status,
+                reservation_order_id,
+                reserved_by,
+                reserved_at
+
+            )
+
+            VALUES (
+
+                ?,
+                ?,
+                ?,
+                ?,
+                'RESERVED',
+                ?,
+                ?,
+                CURRENT_TIMESTAMP
+
+            )
+            `
+        )
+        .bind(
+
+            id,
+
+            district.id,
+
+            coordinate.x,
+
+            coordinate.y,
+
+            orderId,
+
+            userId
+
+        )
+        .run();
+
+
+        return {
+
+            pixelId:
+                id,
+
+            districtId:
+                district.id,
+
+            x:
+                coordinate.x,
+
+            y:
+                coordinate.y,
+
+            status:
+                PIXEL_STATE.RESERVED
+
+        };
+
+    } catch (
+        error
+    ) {
+
+        /*
+         * The row may already exist because another request
+         * reserved or sold the pixel.
+         */
+
+        const existing =
+            await getPixelState(
+                db,
+                id
+            );
+
+
+        if (
+            existing.status !==
+            PIXEL_STATE.AVAILABLE
+        ) {
+
+            throw new Error(
+                "Pixel is no longer available."
+            );
+
+        }
+
+
+        throw error;
+
+    }
+
+}
+
+
+/* =========================================================
+   RESERVE PIXELS
+========================================================= */
+
+export async function reservePixels(
+    db,
+    {
+        districtId,
+        quantity,
+        orderId,
+        userId
+    }
+) {
+
+    const amount =
+        Number(
+            quantity
+        );
+
+
+    if (
+        !Number.isSafeInteger(
+            amount
+        ) ||
+        amount < 1
+    ) {
+
+        throw new Error(
+            "Quantity must be at least 1."
+        );
+
+    }
+
+
+    const available =
+        await getAvailablePixels(
+            db,
+            districtId,
+            amount
+        );
+
+
+    if (
+        available.length !==
+        amount
+    ) {
+
+        throw new Error(
+            "There are not enough available pixels."
+        );
+
+    }
+
+
+    const reserved = [];
+
+
+    try {
+
+        for (
+            const pixel
+            of available
+        ) {
+
+            const result =
+                await reservePixel(
+                    db,
+                    {
+
+                        pixelId:
+                            pixel.pixelId,
+
+                        orderId,
+
+                        userId
+
+                    }
+                );
+
+
+            reserved.push(
+                result
+            );
+
+        }
+
+    } catch (
+        error
+    ) {
+
+        /*
+         * Roll back reservations belonging to this order.
+         */
+
+        await releaseReservations(
+            db,
+            orderId
+        );
+
+
+        throw error;
+
+    }
+
+
+    return reserved;
+
+}
+
+
+/* =========================================================
+   RELEASE RESERVATIONS
+========================================================= */
+
+export async function releaseReservations(
+    db,
+    orderId
+) {
+
+    if (!orderId) {
+
+        throw new Error(
+            "Order ID is required."
+        );
+
+    }
+
+
+    /*
+     * A reservation can only return to AVAILABLE while it is
+     * still RESERVED.
+     *
+     * SOLD pixels can never be released.
+     */
+
+    const reservations =
+        await db.prepare(
+            `
+            SELECT
+                pixel_id
+            FROM canvas_pixels
+            WHERE reservation_order_id = ?
+              AND status = 'RESERVED'
+            `
+        )
+        .bind(
+            orderId
+        )
+        .all();
+
+
+    const pixels =
+        reservations.results || [];
+
+
+    await db.prepare(
+        `
+        DELETE FROM canvas_pixels
+
+        WHERE reservation_order_id = ?
+
+          AND status = 'RESERVED'
+        `
+    )
+    .bind(
+        orderId
+    )
+    .run();
+
+
+    await db.prepare(
+        `
+        UPDATE pixel_reservations
+
+        SET
+            status = 'RELEASED',
+            updated_at = CURRENT_TIMESTAMP
+
+        WHERE order_id = ?
+
+          AND status = 'RESERVED'
+        `
+    )
+    .bind(
+        orderId
+    )
+    .run();
+
+
+    return {
+
+        released:
+            pixels.length
+
+    };
+
+}
+
+
+/* =========================================================
+   PERMANENTLY SELL PIXEL
+========================================================= */
+
+export async function sellPixel(
+    db,
+    {
+        pixelId,
+        orderId,
+        userId
+    }
+) {
+
+    const id =
+        Number(
+            pixelId
+        );
+
+
+    validatePixelId(
+        id
+    );
+
+
+    const pixel =
+        await db.prepare(
+            `
+            SELECT
+                *
+            FROM canvas_pixels
+            WHERE pixel_id = ?
+            LIMIT 1
+            `
+        )
+        .bind(
+            id
+        )
+        .first();
+
+
+    if (!pixel) {
+
+        throw new Error(
+            "Pixel reservation does not exist."
+        );
+
+    }
+
+
+    /*
+     * Only the order that reserved the pixel can finalize it.
+     */
+
+    if (
+        pixel.status !==
+        PIXEL_STATE.RESERVED ||
+        pixel.reservation_order_id !==
+        orderId ||
+        pixel.reserved_by !==
+        userId
+    ) {
+
+        throw new Error(
+            "Pixel is not reserved by this order."
+        );
+
+    }
+
+
+    /*
+     * Change RESERVED → SOLD.
+     *
+     * This is the irreversible ownership transition.
+     */
+
+    const update =
+        await db.prepare(
+            `
+            UPDATE canvas_pixels
+
+            SET
+
+                status =
+                    'SOLD',
+
+                owner_user_id =
+                    ?,
+
+                reservation_order_id =
+                    NULL,
+
+                reserved_by =
+                    NULL,
+
+                reserved_at =
+                    NULL,
+
+                sold_order_id =
+                    ?,
+
+                sold_at =
+                    CURRENT_TIMESTAMP,
+
+                updated_at =
+                    CURRENT_TIMESTAMP
+
+            WHERE pixel_id = ?
+
+              AND status =
+                  'RESERVED'
+
+              AND reservation_order_id =
+                  ?
+
+              AND reserved_by =
+                  ?
+            `
+        )
+        .bind(
+
+            userId,
+
+            orderId,
+
+            id,
+
+            orderId,
+
+            userId
+
+        )
+        .run();
+
+
+    if (
+        update.meta?.changes !== 1
+    ) {
+
+        throw new Error(
+            "Pixel could not be permanently allocated."
+        );
+
+    }
+
+
+    return {
+
+        pixelId:
+            id,
+
+        status:
+            PIXEL_STATE.SOLD,
+
+        ownerUserId:
+            userId,
+
+        orderId
+
+    };
+
+}
+
+
+/* =========================================================
+   PERMANENTLY SELL ORDER PIXELS
+========================================================= */
+
+export async function sellOrderPixels(
+    db,
+    {
+        orderId,
+        userId
+    }
+) {
+
+    const reservations =
+        await db.prepare(
+            `
+            SELECT
+                pixel_id
+            FROM canvas_pixels
+            WHERE reservation_order_id = ?
+              AND status = 'RESERVED'
+              AND reserved_by = ?
+            ORDER BY pixel_id
+            `
+        )
+        .bind(
+            orderId,
+            userId
+        )
+        .all();
+
+
+    const pixels =
+        reservations.results || [];
+
+
+    if (
+        pixels.length === 0
+    ) {
+
+        throw new Error(
+            "No reserved pixels found for this order."
+        );
+
+    }
+
+
+    const sold = [];
+
+
+    for (
+        const pixel
+        of pixels
+    ) {
+
+        const result =
+            await sellPixel(
+                db,
+                {
+
+                    pixelId:
+                        pixel.pixel_id,
+
+                    orderId,
+
+                    userId
+
+                }
+            );
+
+
+        sold.push(
+            result
+        );
+
+    }
+
+
+    return sold;
+
+}
+
+
+/* =========================================================
+   COUNT SOLD PIXELS
+========================================================= */
+
+export async function countSoldPixels(
+    db
 ) {
 
     const result =
         await db.prepare(
             `
             SELECT
-                COALESCE(
-                    SUM(pixel_count),
-                    0
-                ) AS sold_pixels
-
-            FROM pixel_ownership
-
-            WHERE district_id = ?
-
-              AND status = 'SOLD'
+                COUNT(*) AS total
+            FROM canvas_pixels
+            WHERE status = 'SOLD'
             `
-        )
-        .bind(
-            districtId
         )
         .first();
 
 
     return Number(
-        result?.sold_pixels || 0
+        result?.total || 0
     );
 
 }
+
+
+/* =========================================================
+   COUNT REMAINING PIXELS
+========================================================= */
+
+export async function countRemainingPixels(
+    db
+) {
+
+    const sold =
+        await countSoldPixels(
+            db
+        );
+
+
+    return Math.max(
+        0,
+        TOTAL_PIXELS -
+        sold
+    );
+
+}
+
+
+/* =========================================================
+   GET CANVAS STATISTICS
+========================================================= */
+
+export async function getCanvasStatistics(
+    db
+) {
+
+    const result =
+        await db.prepare(
+            `
+            SELECT
+
+                SUM(
+                    CASE
+                        WHEN status = 'SOLD'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS sold,
+
+                SUM(
+                    CASE
+                        WHEN status = 'RESERVED'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS reserved
+
+            FROM canvas_pixels
+            `
+        )
+        .first();
+
+
+    const sold =
+        Number(
+            result?.sold || 0
+        );
+
+
+    const reserved =
+        Number(
+            result?.reserved || 0
+        );
+
+
+    return {
+
+        totalPixels:
+            TOTAL_PIXELS,
+
+        soldPixels:
+            sold,
+
+        reservedPixels:
+            reserved,
+
+        availablePixels:
+            Math.max(
+                0,
+                TOTAL_PIXELS -
+                sold -
+                reserved
+            ),
+
+        percentageSold:
+            (
+                sold /
+                TOTAL_PIXELS
+            ) *
+            100,
+
+        canvasWidth:
+            CANVAS_WIDTH,
+
+        canvasHeight:
+            CANVAS_HEIGHT
+
+    };
+
+}
+
+
+/* =========================================================
+   VERIFY OWNERSHIP
+========================================================= */
+
+export async function verifyOwnership(
+    db,
+    {
+        pixelId,
+        userId
+    }
+) {
+
+    const ownership =
+        await db.prepare(
+            `
+            SELECT
+                id,
+                user_id,
+                order_id,
+                pixel_id,
+                district_id,
+                x,
+                y,
+                status,
+                created_at
+            FROM pixel_ownership
+            WHERE pixel_id = ?
+              AND user_id = ?
+              AND status = 'SOLD'
+            LIMIT 1
+            `
+        )
+        .bind(
+            pixelId,
+            userId
+        )
+        .first();
+
+
+    return Boolean(
+        ownership
+    );
+
+}
+
+
+/* =========================================================
+   DEFAULT EXPORT
+========================================================= */
+
+export default {
+
+    PIXEL_STATE,
+
+    getPixelState,
+
+    findOwnershipAt,
+
+    getOwnership,
+
+    isPixelAvailable,
+
+    getNextAvailablePixel,
+
+    getAvailablePixels,
+
+    reservePixel,
+
+    reservePixels,
+
+    releaseReservations,
+
+    sellPixel,
+
+    sellOrderPixels,
+
+    countSoldPixels,
+
+    countRemainingPixels,
+
+    getCanvasStatistics,
+
+    verifyOwnership
+
+};
