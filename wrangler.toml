@@ -1,73 +1,49 @@
-# =========================================================
-# BILLION PIXEL CANVAS
-# Cloudflare Workers Configuration
-# =========================================================
-
 name = "billion-pixel-canvas"
 
 main = "src/worker.js"
 
-compatibility_date = "2026-08-29"
-
-workers_dev = true
+compatibility_date = "2026-08-30"
 
 
 # =========================================================
-# STATIC WEBSITE
+# CLOUDFLARE STATIC ASSETS
 # =========================================================
 
 [assets]
 
-directory = "."
-
-binding = "ASSETS"
+directory = "./"
 
 
 # =========================================================
-# PRODUCTION ENVIRONMENT
+# D1 DATABASE
 # =========================================================
 
-[env.production]
+[[d1_databases]]
 
-name = "billion-pixel-canvas"
+binding = "DB"
 
-workers_dev = true
+database_name = "billion-pixel-canvas"
+
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 
 
 # =========================================================
-# ENVIRONMENT VARIABLES
+# PRODUCTION VARIABLES
 # =========================================================
 
 [vars]
 
-PROJECT_NAME = "Billion Pixel Canvas"
-
-TOTAL_PIXELS = "1000000000"
-
-PIXEL_PRICE_USD = "1"
-
-PAYMENT_CURRENCY = "BTC"
-
 BTC_RECEIVING_ADDRESS = "bc1qk8ehysk2fthd2p07zgdqz84tyvudkdn4565u40"
 
-OWNERSHIP_POLICY = "PERMANENT_NO_RESALE_NO_TRANSFER"
+BITCOIN_API_BASE = "https://mempool.space/api"
+
+PUBLIC_ORIGIN = "https://REPLACE_WITH_YOUR_CLOUDFLARE_DOMAIN"
 
 
 # =========================================================
-# IMPORTANT
+# OBSERVABILITY
 # =========================================================
-#
-# DO NOT put:
-#
-# - Bitcoin private keys
-# - seed phrases
-# - wallet passwords
-# - API secrets
-# - database passwords
-#
-# in this file.
-#
-# Secrets must be stored using Cloudflare's encrypted
-# secret storage.
-#
-# =========================================================
+
+[observability]
+
+enabled = true
