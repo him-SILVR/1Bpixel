@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="description"
+        content="Billion Pixel Canvas — 1,000,000,000 pixels. $1 each. Buy as many as you want. Once sold, never sold again."
+    >
+
+    <meta
+        name="theme-color"
+        content="#050505"
+    >
+
+    <title>Billion Pixel Canvas — $1 Each</title>
+
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+
+<!-- =========================================================
+     HEADER
+========================================================= -->
+
+<header class="site-header">
+
+    <a href="#top" class="logo">
+        <span class="logo-mark">B</span>
+
+        <span class="logo-text">
+            BILLION PIXEL CANVAS
+        </span>
+    </a>
+
+    <nav class="desktop-nav">
+        <a href="#canvas">Canvas</a>
+        <a href="#districts">Districts</a>
+        <a href="#rules">Rules</a>
+        <a href="#about">About</a>
+    </nav>
+
+    <button
+        class="header-buy-button"
+        id="headerBuyButton"
+        type="button"
+    >
+        Buy Pixels
+    </button>
+
+</header>
+
+
+<!-- =========================================================
+     MAIN
+========================================================= -->
+
+<main id="top">
+
+    <!-- =====================================================
+         HERO
+    ====================================================== -->
+
+    <section class="hero">
+
+        <div class="hero-content">
+
+            <div class="eyebrow">
+                THE INTERNET'S GIANT CANVAS
+            </div>
+
+            <h1>
+                1 BILLION
+                <span>PIXELS.</span>
+            </h1>
+
+            <p class="hero-description">
+                One dollar each.
+                Buy one or buy as many as you want.
+            </p>
+
+            <p class="hero-rule">
+                Once sold, never sold again.
+            </p>
+
+            <div class="hero-actions">
+
+                <button
+                    class="button button-primary"
+                    id="exploreButton"
+                    type="button"
+                >
+                    Explore the Canvas
+                </button>
+
+                <a
+                    href="#rules"
+                    class="button button-secondary"
+                >
+                    How It Works
+                </a>
+
+            </div>
+
+        </div>
+
+
+        <!-- =================================================
+             LIVE STATISTICS
+        ================================================== -->
+
+        <div class="stats-grid">
+
+            <div class="stat">
+                <span class="stat-label">
+                    PIXELS SOLD
+                </span>
+
+                <strong id="pixelsSold">
+                    0
+                </strong>
+            </div>
+
+            <div class="stat">
+                <span class="stat-label">
+                    PIXELS AVAILABLE
+                </span>
+
+                <strong id="pixelsAvailable">
+                    1,000,000,000
+                </strong>
+            </div>
+
+            <div class="stat">
+                <span class="stat-label">
+                    TOTAL RAISED
+                </span>
+
+                <strong id="totalRaised">
+                    $0
+                </strong>
+            </div>
+
+        </div>
+
+    </section>
+
+
+    <!-- =====================================================
+         CANVAS
+    ====================================================== -->
+
+    <section
+        class="canvas-section"
+        id="canvas"
+    >
+
+        <div class="section-heading">
+
+            <div>
+
+                <div class="eyebrow">
+                    EXPLORE
+                </div>
+
+                <h2>
+                    The Canvas
+                </h2>
+
+            </div>
+
+            <div class="canvas-actions">
+
+                <button
+                    id="zoomOut"
+                    class="icon-button"
+                    type="button"
+                    aria-label="Zoom out"
+                >
+                    −
+                </button>
+
+                <button
+                    id="zoomReset"
+                    class="canvas-control"
+                    type="button"
+                >
+                    Reset
+                </button>
+
+                <button
+                    id="zoomIn"
+                    class="icon-button"
+                    type="button"
+                    aria-label="Zoom in"
+                >
+                    +
+                </button>
+
+            </div>
+
+        </div>
+
+
+        <!-- =================================================
+             CANVAS CONTAINER
+        ================================================== -->
+
+        <div class="canvas-container">
+
+            <!-- Toolbar -->
+
+            <div class="canvas-toolbar">
+
+                <div class="district-selector">
+
+                    <label for="districtSelect">
+                        DISTRICT
+                    </label>
+
+                    <select
+                        id="districtSelect"
+                        name="district"
+                    >
+
+                        <option value="people">
+                            People's District
+                        </option>
+
+                        <option value="giants">
+                            Giants District
+                        </option>
+
+                        <option value="youth">
+                            Youth District
+                        </option>
+
+                        <option value="adult">
+                            Adult District · 18+
+                        </option>
+
+                    </select>
+
+                </div>
+
+
+                <div class="selection-summary">
+
+                    <span id="selectionText">
+                        0 pixels selected
+                    </span>
+
+                    <button
+                        id="clearSelection"
+                        class="clear-button"
+                        type="button"
+                    >
+                        Clear
+                    </button>
+
+                </div>
+
+            </div>
+
+
+            <!-- =================================================
+                 INTERACTIVE VIEWPORT
+            ================================================== -->
+
+            <div
+                id="canvasViewport"
+                class="canvas-viewport"
+                tabindex="0"
+                aria-label="Interactive Billion Pixel Canvas"
+            >
+
+                <div
+                    id="canvasWorld"
+                    class="canvas-world"
+                >
+
+                    <!--
+                        The production renderer will replace this
+                        logical placeholder with tiled rendering.
+                    -->
+
+                    <div class="canvas-center-label">
+
+                        <span>
+                            1,000,000,000
+                        </span>
+
+                        <small>
+                            PIXELS
+                        </small>
+
+                    </div>
+
+                </div>
+
+
+                <div
+                    class="canvas-crosshair"
+                    aria-hidden="true"
+                ></div>
+
+            </div>
+
+
+            <!-- =================================================
+                 CANVAS FOOTER
+            ================================================== -->
+
+            <div class="canvas-footer">
+
+                <div class="canvas-instructions">
+
+                    <span>
+                        Drag to move
+                    </span>
+
+                    <span>•</span>
+
+                    <span>
+                        Scroll or pinch to zoom
+                    </span>
+
+                    <span>•</span>
+
+                    <span>
+                        Click to select
+                    </span>
+
+                </div>
+
+                <button
+                    id="buySelectedButton"
+                    class="button button-primary"
+                    type="button"
+                >
+                    Buy Selected Pixels
+                </button>
+
+            </div>
+
+        </div>
+
+    </section>
+
+
+    <!-- =====================================================
+         DISTRICTS
+    ====================================================== -->
+
+    <section
+        class="districts-section"
+        id="districts"
+    >
+
+        <div class="section-heading">
+
+            <div>
+
+                <div class="eyebrow">
+                    THE CANVAS
+                </div>
+
+                <h2>
+                    Four Districts.
+                </h2>
+
+            </div>
+
+        </div>
+
+
+        <div class="district-grid">
+
+
+            <!-- PEOPLE -->
+
+            <article
+                class="district-card district-people"
+            >
+
+                <div class="district-number">
+                    01
+                </div>
+
+                <div class="district-content">
+
+                    <h3>
+                        People's District
+                    </h3>
+
+                    <p>
+                        A place for individual owners.
+                        Buy one pixel or millions.
+                    </p>
+
+                    <div class="district-price">
+                        Minimum: 1 pixel
+                    </div>
+
+                    <div class="district-cost">
+                        $1
+                    </div>
+
+                </div>
+
+            </article>
+
+
+            <!-- GIANTS -->
+
+            <article
+                class="district-card district-giants"
+            >
+
+                <div class="district-number">
+                    02
+                </div>
+
+                <div class="district-content">
+
+                    <h3>
+                        Giants District
+                    </h3>
+
+                    <p>
+                        Large territories for major buyers,
+                        creators, organizations and brands.
+                    </p>
+
+                    <div class="district-price">
+                        Minimum: 100,000 pixels
+                    </div>
+
+                    <div class="district-cost">
+                        $100,000
+                    </div>
+
+                </div>
+
+            </article>
+
+
+            <!-- YOUTH -->
+
+            <article
+                class="district-card district-youth"
+            >
+
+                <div class="district-number">
+                    03
+                </div>
+
+                <div class="district-content">
+
+                    <h3>
+                        Youth District
+                    </h3>
+
+                    <p>
+                        A family-friendly area for
+                        age-appropriate creative,
+                        educational and community content.
+                    </p>
+
+                    <div class="district-price">
+                        Minimum: 1 pixel
+                    </div>
+
+                    <div class="district-cost">
+                        $1
+                    </div>
+
+                </div>
+
+            </article>
+
+
+            <!-- ADULT -->
+
+            <article
+                class="district-card district-adult"
+            >
+
+                <div class="district-number">
+                    18+
+                </div>
+
+                <div class="district-content">
+
+                    <h3>
+                        Adult District
+                    </h3>
+
+                    <p>
+                        A separately identified 18+ area
+                        for legally permissible adult expression.
+                    </p>
+
+                    <div class="district-price">
+                        Minimum: 100,000 pixels
+                    </div>
+
+                    <div class="district-cost">
+                        $100,000
+                    </div>
+
+                </div>
+
+            </article>
+
+        </div>
+
+    </section>
+
+
+    <!-- =====================================================
+         RULES
+    ====================================================== -->
+
+    <section
+        class="rules-section"
+        id="rules"
+    >
+
+        <div class="eyebrow">
+            THE RULES
+        </div>
+
+        <h2>
+            Simple by design.
+        </h2>
+
+
+        <div class="rules-grid">
+
+
+            <article class="rule-card">
+
+                <span>
+                    01
+                </span>
+
+                <h3>
+                    $1 = 1 Pixel
+                </h3>
+
+                <p>
+                    Every pixel has the same permanent
+                    primary-sale price: one US dollar.
+                </p>
+
+            </article>
+
+
+            <article class="rule-card">
+
+                <span>
+                    02
+                </span>
+
+                <h3>
+                    Buy as many as you want
+                </h3>
+
+                <p>
+                    There is no maximum purchase.
+                    Availability is the only limit.
+                </p>
+
+            </article>
+
+
+            <article class="rule-card">
+
+                <span>
+                    03
+                </span>
+
+                <h3>
+                    Sold means sold
+                </h3>
+
+                <p>
+                    A sold pixel cannot be resold,
+                    transferred or returned to inventory.
+                </p>
+
+            </article>
+
+
+            <article class="rule-card">
+
+                <span>
+                    04
+                </span>
+
+                <h3>
+                    Bitcoin payments
+                </h3>
+
+                <p>
+                    Production purchases will be verified
+                    directly against the Bitcoin blockchain.
+                </p>
+
+            </article>
+
+        </div>
+
+    </section>
+
+
+    <!-- =====================================================
+         ABOUT
+    ====================================================== -->
+
+    <section
+        class="about-section"
+        id="about"
+    >
+
+        <div class="about-inner">
+
+            <div class="eyebrow">
+                THE IDEA
+            </div>
+
+            <h2>
+                One billion pieces
+                of digital space.
+            </h2>
+
+            <p>
+                Billion Pixel Canvas is a permanent digital
+                canvas containing one billion pixels.
+                Each pixel is offered once for $1.
+            </p>
+
+            <p>
+                You can own one pixel, a hundred pixels,
+                a hundred thousand pixels or millions of pixels.
+                The price remains $1 per pixel.
+            </p>
+
+            <p class="about-emphasis">
+                Once a pixel is sold, it is never sold again.
+            </p>
+
+        </div>
+
+    </section>
+
+
+    <!-- =====================================================
+         FINAL CTA
+    ====================================================== -->
+
+    <section class="final-cta">
+
+        <div class="eyebrow">
+            THE CHALLENGE
+        </div>
+
+        <h2>
+            Can the Internet sell
+            one billion pixels?
+        </h2>
+
+        <button
+            id="finalBuyButton"
+            class="button button-primary button-large"
+            type="button"
+        >
+            Buy Your First Pixel
+        </button>
+
+    </section>
+
+</main>
+
+
+<!-- =========================================================
+     CHECKOUT MODAL
+========================================================= -->
+
+<div
+    id="checkoutOverlay"
+    class="modal-overlay hidden"
+    aria-hidden="true"
+>
+    <div
+        class="checkout-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="checkoutTitle"
+    >
+
+        <button
+            id="closeCheckout"
+            class="modal-close"
+            type="button"
+            aria-label="Close checkout"
+        >
+            ×
+        </button>
+
+
+        <div class="eyebrow">
+            PIXEL CHECKOUT
+        </div>
+
+        <h2 id="checkoutTitle">
+            Buy Pixels
+        </h2>
+
+
+        <!-- Pixel quantity -->
+
+        <div class="checkout-field">
+
+            <label for="pixelQuantity">
+                Number of pixels
+            </label>
+
+            <input
+                id="pixelQuantity"
+                type="number"
+                min="1"
+                step="1"
+                value="1"
+                inputmode="numeric"
+            >
+
+        </div>
+
+
+        <!-- District -->
+
+        <div class="checkout-field">
+
+            <label for="checkoutDistrict">
+                District
+            </label>
+
+            <select
+                id="checkoutDistrict"
+            >
+
+                <option value="people">
+                    People's District
+                </option>
+
+                <option value="giants">
+                    Giants District
+                </option>
+
+                <option value="youth">
+                    Youth District
+                </option>
+
+                <option value="adult">
+                    Adult District · 18+
+                </option>
+
+            </select>
+
+        </div>
+
+
+        <!-- Summary -->
+
+        <div class="checkout-summary">
+
+            <div>
+                <span>
+                    Pixels
+                </span>
+
+                <strong id="checkoutPixels">
+                    1
+                </strong>
+            </div>
+
+            <div>
+                <span>
+                    Price
+                </span>
+
+                <strong id="checkoutPrice">
+                    $1
+                </strong>
+            </div>
+
+        </div>
+
+
+        <!-- Bitcoin -->
+
+        <div class="bitcoin-payment">
+
+            <div class="bitcoin-label">
+                BITCOIN PAYMENT
+            </div>
+
+            <p>
+                Production checkout will calculate the
+                current BTC equivalent of the USD purchase
+                and verify the transaction on-chain.
+            </p>
+
+            <div class="bitcoin-address">
+
+                <span>
+                    Receiving address
+                </span>
+
+                <code>
+                    bc1qk8ehysk2fthd2p07zgdqz84tyvudkdn4565u40
+                </code>
+
+            </div>
+
+        </div>
+
+
+        <div class="checkout-warning">
+
+            <strong>
+                Production payment is not connected yet.
+            </strong>
+
+            <span>
+                Do not send Bitcoin from this prototype.
+            </span>
+
+        </div>
+
+
+        <button
+            id="continueCheckout"
+            class="button button-primary button-full"
+            type="button"
+        >
+            Continue
+        </button>
+
+    </div>
+
+</div>
+
+
+<!-- =========================================================
+     FOOTER
+========================================================= -->
+
+<footer class="site-footer">
+
+    <div>
+
+        <strong>
+            BILLION PIXEL CANVAS
+        </strong>
+
+        <span>
+            1,000,000,000 pixels · $1 each
+        </span>
+
+    </div>
+
+    <div>
+
+        <span>
+            Once sold, never sold again.
+        </span>
+
+    </div>
+
+</footer>
+
+
+<!-- =========================================================
+     JAVASCRIPT
+========================================================= -->
+
+<script src="app.js"></script>
+
+</body>
+</html>
