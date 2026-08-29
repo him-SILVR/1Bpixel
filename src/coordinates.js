@@ -1,29 +1,33 @@
 /**
  * =========================================================
  * BILLION PIXEL CANVAS
- * Coordinate & Allocation Engine
+ * COORDINATE SYSTEM
  * =========================================================
  *
- * Coordinate system:
+ * TOTAL CANVAS:
  *
- *     (0,0) ----------------------> X
- *       |
- *       |
- *       |
- *       v
- *       Y
+ * 1,000,000,000 pixels
  *
- * Every logical pixel has:
+ * Every pixel has a permanent logical ID:
+ *
+ *     pixel_id
+ *
+ * and a visual coordinate:
  *
  *     x
  *     y
  *
- * Coordinates are zero-based.
+ * =========================================================
  *
- * We do NOT create 1 billion database rows.
+ * IMPORTANT
  *
- * Large purchases are represented as rectangular ownership
- * blocks whenever possible.
+ * The canvas is represented logically.
+ *
+ * We do NOT create one billion database rows just to
+ * represent unsold pixels.
+ *
+ * Only purchased/reserved pixels need database records.
+ *
  * =========================================================
  */
 
@@ -31,178 +35,180 @@
 
 
 /* =========================================================
-   CANVAS CONSTANTS
+   MASTER CANVAS
 ========================================================= */
 
-export const CANVAS_WIDTH = 31623;
-
-export const CANVAS_HEIGHT = 31623;
-
-export const TOTAL_CANVAS_PIXELS =
-    1_000_014_129;
-
-
-/*
- * 31,623 × 31,623 is slightly larger than one billion.
- *
- * Therefore the final implementation uses a logical
- * one-billion-pixel boundary rather than assuming every
- * coordinate in the square is valid.
- */
-
-export const REQUIRED_PIXEL_COUNT =
+export const TOTAL_PIXELS =
     1_000_000_000;
 
 
-/* =========================================================
-   DISTRICT DEFINITIONS
-========================================================= */
+/*
+ * We use a rectangular logical grid.
+ *
+ * WIDTH × HEIGHT must be >= 1 billion.
+ */
 
-export const DISTRICTS = Object.freeze({
-
-    people: Object.freeze({
-
-        id: "people",
-
-        name: "People's District",
-
-        minimumPurchasePixels: 1,
-
-        adultOnly: false,
-
-        x: 0,
-
-        y: 0,
-
-        width: 15812,
-
-        height: 31623
-
-    }),
+export const CANVAS_WIDTH =
+    40_000;
 
 
-    giants: Object.freeze({
-
-        id: "giants",
-
-        name: "Giants District",
-
-        minimumPurchasePixels: 100000,
-
-        adultOnly: false,
-
-        x: 15812,
-
-        y: 0,
-
-        width: 7906,
-
-        height: 31623
-
-    }),
+export const CANVAS_HEIGHT =
+    25_000;
 
 
-    youth: Object.freeze({
+/*
+ * Exactly:
+ *
+ * 40,000 × 25,000
+ * = 1,000,000,000
+ */
 
-        id: "youth",
-
-        name: "Youth District",
-
-        minimumPurchasePixels: 1,
-
-        adultOnly: false,
-
-        x: 23718,
-
-        y: 0,
-
-        width: 3953,
-
-        height: 31623
-
-    }),
-
-
-    adult: Object.freeze({
-
-        id: "adult",
-
-        name: "Adult District",
-
-        minimumPurchasePixels: 100000,
-
-        adultOnly: true,
-
-        x: 27671,
-
-        y: 0,
-
-        width: 3952,
-
-        height: 31623
-
-    })
-
-});
-
-
-/* =========================================================
-   BASIC MATH
-========================================================= */
-
-export function rectanglePixelCount(
-    width,
-    height
+if (
+    CANVAS_WIDTH *
+    CANVAS_HEIGHT !==
+    TOTAL_PIXELS
 ) {
 
-    if (
-        !Number.isSafeInteger(width) ||
-        !Number.isSafeInteger(height)
-    ) {
-
-        throw new Error(
-            "Rectangle dimensions must be integers."
-        );
-
-    }
-
-    if (
-        width <= 0 ||
-        height <= 0
-    ) {
-
-        throw new Error(
-            "Rectangle dimensions must be positive."
-        );
-
-    }
-
-    return width * height;
-
-}
-
-
-/* =========================================================
-   DISTRICT CAPACITY
-========================================================= */
-
-export function getDistrictCapacity(
-    district
-) {
-
-    return rectanglePixelCount(
-        district.width,
-        district.height
+    throw new Error(
+        "Canvas dimensions do not equal one billion pixels."
     );
 
 }
 
 
 /* =========================================================
-   CANVAS BOUNDS
+   PIXEL ID → COORDINATE
 ========================================================= */
 
-export function isInsideCanvas(
+/**
+ * Convert a zero-based pixel ID into x/y coordinates.
+ *
+ * pixel_id 0:
+ * x = 0
+ * y = 0
+ *
+ * pixel_id 1:
+ * x = 1
+ * y = 0
+ *
+ * ...
+ */
+
+export function pixelIdToCoordinate(
+    pixelId
+) {
+
+    const id =
+        Number(
+            pixelId
+        );
+
+
+    validatePixelId(
+        id
+    );
+
+
+    const x =
+        id %
+        CANVAS_WIDTH;
+
+
+    const y =
+        Math.floor(
+            id /
+            CANVAS_WIDTH
+        );
+
+
+    return {
+
+        pixelId:
+            id,
+
+        x,
+
+        y
+
+    };
+
+}
+
+
+/* =========================================================
+   COORDINATE → PIXEL ID
+========================================================= */
+
+export function coordinateToPixelId(
+    x,
+    y
+) {
+
+    const coordinateX =
+        Number(x);
+
+    const coordinateY =
+        Number(y);
+
+
+    validateCoordinate(
+        coordinateX,
+        coordinateY
+    );
+
+
+    return (
+        coordinateY *
+        CANVAS_WIDTH
+    ) +
+    coordinateX;
+
+}
+
+
+/* =========================================================
+   VALIDATE PIXEL ID
+========================================================= */
+
+export function validatePixelId(
+    pixelId
+) {
+
+    if (
+        !Number.isSafeInteger(
+            pixelId
+        )
+    ) {
+
+        throw new Error(
+            "Pixel ID must be an integer."
+        );
+
+    }
+
+
+    if (
+        pixelId < 0 ||
+        pixelId >= TOTAL_PIXELS
+    ) {
+
+        throw new Error(
+            "Pixel ID is outside the Billion Pixel Canvas."
+        );
+
+    }
+
+
+    return true;
+
+}
+
+
+/* =========================================================
+   VALIDATE COORDINATE
+========================================================= */
+
+export function validateCoordinate(
     x,
     y
 ) {
@@ -212,34 +218,36 @@ export function isInsideCanvas(
         !Number.isSafeInteger(y)
     ) {
 
-        return false;
+        throw new Error(
+            "Canvas coordinates must be integers."
+        );
 
     }
+
 
     if (
         x < 0 ||
-        y < 0
+        x >= CANVAS_WIDTH
     ) {
 
-        return false;
+        throw new Error(
+            "X coordinate is outside the canvas."
+        );
 
     }
 
-    /*
-     * The logical canvas is one billion pixels.
-     *
-     * Coordinates beyond the configured rectangular
-     * capacity are rejected.
-     */
 
     if (
-        x >= CANVAS_WIDTH ||
+        y < 0 ||
         y >= CANVAS_HEIGHT
     ) {
 
-        return false;
+        throw new Error(
+            "Y coordinate is outside the canvas."
+        );
 
     }
+
 
     return true;
 
@@ -247,206 +255,156 @@ export function isInsideCanvas(
 
 
 /* =========================================================
-   DISTRICT BOUNDS
+   COORDINATE KEY
 ========================================================= */
 
-export function isInsideDistrict(
-    x,
-    y,
-    districtId
-) {
-
-    const district =
-        DISTRICTS[districtId];
-
-    if (!district) {
-
-        return false;
-
-    }
-
-    if (
-        !isInsideCanvas(
-            x,
-            y
-        )
-    ) {
-
-        return false;
-
-    }
-
-    return (
-        x >= district.x &&
-        x < district.x + district.width &&
-        y >= district.y &&
-        y < district.y + district.height
-    );
-
-}
-
-
-/* =========================================================
-   GET DISTRICT
-========================================================= */
-
-export function getDistrict(
-    districtId
-) {
-
-    const district =
-        DISTRICTS[districtId];
-
-    if (!district) {
-
-        throw new Error(
-            `Unknown district: ${districtId}`
-        );
-
-    }
-
-    return district;
-
-}
-
-
-/* =========================================================
-   PIXEL ID
-========================================================= */
-
-export function coordinateToPixelId(
+export function coordinateKey(
     x,
     y
 ) {
 
-    if (
-        !isInsideCanvas(
-            x,
-            y
-        )
-    ) {
+    validateCoordinate(
+        x,
+        y
+    );
 
-        throw new Error(
-            "Coordinate is outside the canvas."
-        );
 
-    }
-
-    /*
-     * Row-major logical identifier.
-     *
-     * This ID is deterministic.
-     *
-     * NOTE:
-     * Because the square is slightly larger than one billion
-     * coordinates, production code must also check that the
-     * resulting ID is within the one-billion logical range.
-     */
-
-    const id =
-        y * CANVAS_WIDTH +
-        x;
-
-    if (
-        id >= REQUIRED_PIXEL_COUNT
-    ) {
-
-        throw new Error(
-            "Coordinate is outside the one-billion-pixel logical range."
-        );
-
-    }
-
-    return id;
+    return `${x}:${y}`;
 
 }
 
 
 /* =========================================================
-   PIXEL ID → COORDINATE
+   PIXEL KEY
 ========================================================= */
 
-export function pixelIdToCoordinate(
+export function pixelKey(
     pixelId
 ) {
 
-    if (
-        !Number.isSafeInteger(pixelId)
-    ) {
+    validatePixelId(
+        pixelId
+    );
 
-        throw new Error(
-            "Pixel ID must be an integer."
-        );
 
-    }
-
-    if (
-        pixelId < 0 ||
-        pixelId >= REQUIRED_PIXEL_COUNT
-    ) {
-
-        throw new Error(
-            "Pixel ID is outside the canvas."
-        );
-
-    }
-
-    const y =
-        Math.floor(
-            pixelId /
-            CANVAS_WIDTH
-        );
-
-    const x =
-        pixelId %
-        CANVAS_WIDTH;
-
-    return {
-        x,
-        y
-    };
+    return `pixel:${pixelId}`;
 
 }
 
 
 /* =========================================================
-   COORDINATE OBJECT
+   CHECK RECTANGLE
 ========================================================= */
 
-export function createCoordinate(
+export function validateRectangle(
     x,
     y,
-    districtId
+    width,
+    height
 ) {
 
+    const startX =
+        Number(x);
+
+    const startY =
+        Number(y);
+
+    const rectangleWidth =
+        Number(width);
+
+    const rectangleHeight =
+        Number(height);
+
+
     if (
-        !isInsideDistrict(
-            x,
-            y,
-            districtId
+        !Number.isSafeInteger(
+            startX
+        ) ||
+        !Number.isSafeInteger(
+            startY
+        ) ||
+        !Number.isSafeInteger(
+            rectangleWidth
+        ) ||
+        !Number.isSafeInteger(
+            rectangleHeight
         )
     ) {
 
         throw new Error(
-            "Coordinate does not belong to the selected district."
+            "Rectangle coordinates and dimensions must be integers."
         );
 
     }
 
+
+    if (
+        rectangleWidth < 1 ||
+        rectangleHeight < 1
+    ) {
+
+        throw new Error(
+            "Rectangle dimensions must be positive."
+        );
+
+    }
+
+
+    if (
+        startX < 0 ||
+        startY < 0
+    ) {
+
+        throw new Error(
+            "Rectangle cannot start outside the canvas."
+        );
+
+    }
+
+
+    if (
+        startX +
+        rectangleWidth >
+        CANVAS_WIDTH
+    ) {
+
+        throw new Error(
+            "Rectangle extends beyond the canvas width."
+        );
+
+    }
+
+
+    if (
+        startY +
+        rectangleHeight >
+        CANVAS_HEIGHT
+    ) {
+
+        throw new Error(
+            "Rectangle extends beyond the canvas height."
+        );
+
+    }
+
+
     return {
 
-        pixelId:
-            coordinateToPixelId(
-                x,
-                y
-            ),
+        x:
+            startX,
 
-        x,
+        y:
+            startY,
 
-        y,
+        width:
+            rectangleWidth,
 
-        district:
-            districtId
+        height:
+            rectangleHeight,
+
+        area:
+            rectangleWidth *
+            rectangleHeight
 
     };
 
@@ -454,220 +412,67 @@ export function createCoordinate(
 
 
 /* =========================================================
-   RECTANGLE VALIDATION
+   ITERATE RECTANGLE
 ========================================================= */
 
-export function validateRectangle(
-    rectangle,
-    districtId
-) {
+/**
+ * Generate pixel IDs for a rectangle.
+ *
+ * This is intentionally a generator so a large rectangle
+ * does not have to be copied into memory all at once.
+ */
 
-    if (!rectangle) {
-
-        return {
-            valid: false,
-            reason:
-                "Rectangle is required."
-        };
-
-    }
-
-    const {
-        x,
-        y,
-        width,
-        height
-    } = rectangle;
-
-
-    if (
-        !Number.isSafeInteger(x) ||
-        !Number.isSafeInteger(y) ||
-        !Number.isSafeInteger(width) ||
-        !Number.isSafeInteger(height)
-    ) {
-
-        return {
-            valid: false,
-            reason:
-                "Rectangle values must be integers."
-        };
-
-    }
-
-
-    if (
-        width <= 0 ||
-        height <= 0
-    ) {
-
-        return {
-            valid: false,
-            reason:
-                "Rectangle dimensions must be positive."
-        };
-
-    }
-
-
-    const district =
-        getDistrict(
-            districtId
-        );
-
-
-    if (
-        x < district.x ||
-        y < district.y
-    ) {
-
-        return {
-            valid: false,
-            reason:
-                "Rectangle begins outside the district."
-        };
-
-    }
-
-
-    if (
-        x + width >
-        district.x +
-        district.width
-    ) {
-
-        return {
-            valid: false,
-            reason:
-                "Rectangle exceeds district width."
-        };
-
-    }
-
-
-    if (
-        y + height >
-        district.y +
-        district.height
-    ) {
-
-        return {
-            valid: false,
-            reason:
-                "Rectangle exceeds district height."
-        };
-
-    }
-
-
-    return {
-
-        valid: true,
-
-        pixelCount:
-            width *
-            height
-
-    };
-
-}
-
-
-/* =========================================================
-   RECTANGLE CREATOR
-========================================================= */
-
-export function createRectangle(
+export function* iterateRectangle(
     x,
     y,
     width,
-    height,
-    districtId
+    height
 ) {
 
-    const validation =
+    const rectangle =
         validateRectangle(
-            {
-                x,
-                y,
-                width,
-                height
-            },
-            districtId
+            x,
+            y,
+            width,
+            height
         );
-
-
-    if (!validation.valid) {
-
-        throw new Error(
-            validation.reason
-        );
-
-    }
-
-
-    return {
-
-        x,
-
-        y,
-
-        width,
-
-        height,
-
-        pixelCount:
-            validation.pixelCount,
-
-        district:
-            districtId
-
-    };
-
-}
-
-
-/* =========================================================
-   RECTANGLE ITERATOR
-========================================================= */
-
-export function* iterateRectangle(
-    rectangle
-) {
-
-    const {
-        x,
-        y,
-        width,
-        height
-    } = rectangle;
 
 
     for (
-        let currentY = y;
-        currentY < y + height;
-        currentY++
+        let row = 0;
+        row < rectangle.height;
+        row++
     ) {
 
+        const currentY =
+            rectangle.y +
+            row;
+
+
         for (
-            let currentX = x;
-            currentX < x + width;
-            currentX++
+            let column = 0;
+            column < rectangle.width;
+            column++
         ) {
 
+            const currentX =
+                rectangle.x +
+                column;
+
+
             yield {
-
-                x:
-                    currentX,
-
-                y:
-                    currentY,
 
                 pixelId:
                     coordinateToPixelId(
                         currentX,
                         currentY
-                    )
+                    ),
+
+                x:
+                    currentX,
+
+                y:
+                    currentY
 
             };
 
@@ -679,57 +484,271 @@ export function* iterateRectangle(
 
 
 /* =========================================================
-   RECTANGLE INTERSECTION
+   DISTRICT SYSTEM
 ========================================================= */
 
-export function rectanglesOverlap(
-    first,
-    second
-) {
-
-    return !(
-        first.x +
-        first.width <=
-        second.x ||
-
-        second.x +
-        second.width <=
-        first.x ||
-
-        first.y +
-        first.height <=
-        second.y ||
-
-        second.y +
-        second.height <=
-        first.y
-    );
-
-}
+/*
+ * Districts are logical regions of the canvas.
+ *
+ * The exact visual layout can be changed before launch
+ * without changing the permanent pixel ID system.
+ *
+ * Current planned structure:
+ *
+ * ┌──────────────────────────────────────────────┐
+ * │                                              │
+ * │                 MAIN DISTRICT                │
+ * │                                              │
+ * │       ┌──────────────┐                       │
+ * │       │ GIANTS       │                       │
+ * │       │ DISTRICT     │                       │
+ * │       └──────────────┘                       │
+ * │                                              │
+ * │                         ┌──────────────────┐  │
+ * │                         │ YOUTH DISTRICT   │  │
+ * │                         └──────────────────┘  │
+ * │                                              │
+ * │  ┌────────────────────────────────────────┐  │
+ * │  │ ADULT DISTRICT — 18+ / 100K MINIMUM   │  │
+ * │  └────────────────────────────────────────┘  │
+ * └──────────────────────────────────────────────┘
+ *
+ *
+ * NOTE:
+ *
+ * District boundaries below are configuration, not ownership.
+ *
+ * A pixel still has one unique global pixel_id.
+ */
 
 
 /* =========================================================
-   RECTANGLE AREA
+   DISTRICT DEFINITIONS
 ========================================================= */
 
-export function rectangleArea(
-    rectangle
+export const DISTRICT_LAYOUT = Object.freeze({
+
+    main: {
+
+        id:
+            "main",
+
+        name:
+            "Main District",
+
+        x:
+            0,
+
+        y:
+            0,
+
+        width:
+            CANVAS_WIDTH,
+
+        height:
+            18_000,
+
+        minimumPixels:
+            1,
+
+        adultOnly:
+            false
+
+    },
+
+
+    giants: {
+
+        id:
+            "giants",
+
+        name:
+            "Giants District",
+
+        x:
+            4_000,
+
+        y:
+            4_000,
+
+        width:
+            10_000,
+
+        height:
+            6_000,
+
+        minimumPixels:
+            1,
+
+        adultOnly:
+            false
+
+    },
+
+
+    youth: {
+
+        id:
+            "youth",
+
+        name:
+            "Youth District",
+
+        x:
+            26_000,
+
+        y:
+            4_000,
+
+        width:
+            10_000,
+
+        height:
+            6_000,
+
+        minimumPixels:
+            1,
+
+        adultOnly:
+            false
+
+    },
+
+
+    adult: {
+
+        id:
+            "adult",
+
+        name:
+            "Adult District",
+
+        x:
+            0,
+
+        y:
+            18_000,
+
+        width:
+            CANVAS_WIDTH,
+
+        height:
+            7_000,
+
+        minimumPixels:
+            100_000,
+
+        adultOnly:
+            true
+
+    }
+
+});
+
+
+/* =========================================================
+   DISTRICT LOOKUP
+========================================================= */
+
+export function getDistrict(
+    districtId
 ) {
+
+    if (
+        typeof districtId !== "string"
+    ) {
+
+        return null;
+
+    }
+
 
     return (
-        rectangle.width *
-        rectangle.height
+        DISTRICT_LAYOUT[
+            districtId
+                .trim()
+                .toLowerCase()
+        ] ||
+        null
     );
 
 }
 
 
 /* =========================================================
-   FIND SIMPLE BLOCK SHAPE
+   COORDINATE → DISTRICT
 ========================================================= */
 
-export function findSimpleBlockShape(
-    pixelCount,
+export function getDistrictAtCoordinate(
+    x,
+    y
+) {
+
+    validateCoordinate(
+        x,
+        y
+    );
+
+
+    /*
+     * More specific districts are checked first.
+     */
+
+    const districtIds = [
+
+        "giants",
+
+        "youth",
+
+        "adult",
+
+        "main"
+
+    ];
+
+
+    for (
+        const districtId
+        of districtIds
+    ) {
+
+        const district =
+            DISTRICT_LAYOUT[
+                districtId
+            ];
+
+
+        if (
+            x >= district.x &&
+
+            x <
+                district.x +
+                district.width &&
+
+            y >= district.y &&
+
+            y <
+                district.y +
+                district.height
+        ) {
+
+            return district;
+
+        }
+
+    }
+
+
+    return null;
+
+}
+
+
+/* =========================================================
+   DISTRICT AREA
+========================================================= */
+
+export function getDistrictArea(
     districtId
 ) {
 
@@ -739,116 +758,149 @@ export function findSimpleBlockShape(
         );
 
 
+    if (!district) {
+
+        throw new Error(
+            "District not found."
+        );
+
+    }
+
+
+    return (
+        district.width *
+        district.height
+    );
+
+}
+
+
+/* =========================================================
+   DISTRICT PIXEL ITERATOR
+========================================================= */
+
+export function* iterateDistrictPixels(
+    districtId
+) {
+
+    const district =
+        getDistrict(
+            districtId
+        );
+
+
+    if (!district) {
+
+        throw new Error(
+            "District not found."
+        );
+
+    }
+
+
+    yield* iterateRectangle(
+
+        district.x,
+
+        district.y,
+
+        district.width,
+
+        district.height
+
+    );
+
+}
+
+
+/* =========================================================
+   CHECK PIXEL BELONGS TO DISTRICT
+========================================================= */
+
+export function pixelBelongsToDistrict(
+    pixelId,
+    districtId
+) {
+
+    const coordinate =
+        pixelIdToCoordinate(
+            pixelId
+        );
+
+
+    const district =
+        getDistrictAtCoordinate(
+            coordinate.x,
+            coordinate.y
+        );
+
+
+    if (!district) {
+
+        return false;
+
+    }
+
+
+    return (
+        district.id ===
+        districtId
+    );
+
+}
+
+
+/* =========================================================
+   GENERATE PIXEL RANGE
+========================================================= */
+
+export function getPixelRange(
+    startPixelId,
+    count
+) {
+
+    const start =
+        Number(
+            startPixelId
+        );
+
+    const amount =
+        Number(
+            count
+        );
+
+
+    validatePixelId(
+        start
+    );
+
+
     if (
         !Number.isSafeInteger(
-            pixelCount
+            amount
         ) ||
-        pixelCount <= 0
+        amount < 1
     ) {
 
         throw new Error(
-            "Pixel count must be a positive integer."
+            "Pixel count must be at least 1."
         );
 
     }
 
 
+    const end =
+        start +
+        amount -
+        1;
+
+
     if (
-        pixelCount >
-        getDistrictCapacity(
-            district
-        )
+        end >= TOTAL_PIXELS
     ) {
 
         throw new Error(
-            "Requested block exceeds district capacity."
-        );
-
-    }
-
-
-    /*
-     * Prefer a square where possible.
-     */
-
-    const squareSide =
-        Math.floor(
-            Math.sqrt(
-                pixelCount
-            )
-        );
-
-
-    if (
-        squareSide > 0 &&
-        squareSide *
-        squareSide ===
-        pixelCount
-    ) {
-
-        return {
-
-            width:
-                squareSide,
-
-            height:
-                squareSide
-
-        };
-
-    }
-
-
-    /*
-     * Otherwise use a single-row rectangle when possible.
-     *
-     * Large production purchases should use an allocator
-     * optimized for the actual available geometry.
-     */
-
-    if (
-        pixelCount <=
-        district.width
-    ) {
-
-        return {
-
-            width:
-                pixelCount,
-
-            height:
-                1
-
-        };
-
-    }
-
-
-    /*
-     * Create the smallest height possible for the district
-     * width.
-     */
-
-    const width =
-        Math.min(
-            district.width,
-            pixelCount
-        );
-
-    const height =
-        Math.ceil(
-            pixelCount /
-            width
-        );
-
-
-    if (
-        height >
-        district.height
-    ) {
-
-        throw new Error(
-            "Unable to create a rectangle for requested pixel count."
+            "Pixel range exceeds the canvas."
         );
 
     }
@@ -856,9 +908,12 @@ export function findSimpleBlockShape(
 
     return {
 
-        width,
+        start,
 
-        height
+        end,
+
+        count:
+            amount
 
     };
 
@@ -866,149 +921,15 @@ export function findSimpleBlockShape(
 
 
 /* =========================================================
-   DISTRICT VALIDATION
+   PUBLIC CANVAS CONFIGURATION
 ========================================================= */
 
-export function validateDistricts() {
-
-    const districtList =
-        Object.values(
-            DISTRICTS
-        );
-
-
-    let total =
-        0;
-
-
-    for (
-        const district
-        of districtList
-    ) {
-
-        const capacity =
-            getDistrictCapacity(
-                district
-            );
-
-
-        if (
-            capacity <= 0
-        ) {
-
-            throw new Error(
-                `District ${district.id} has invalid capacity.`
-            );
-
-        }
-
-
-        if (
-            district.x < 0 ||
-            district.y < 0
-        ) {
-
-            throw new Error(
-                `District ${district.id} has invalid origin.`
-            );
-
-        }
-
-
-        if (
-            district.x +
-            district.width >
-            CANVAS_WIDTH
-        ) {
-
-            throw new Error(
-                `District ${district.id} exceeds canvas width.`
-            );
-
-        }
-
-
-        if (
-            district.y +
-            district.height >
-            CANVAS_HEIGHT
-        ) {
-
-            throw new Error(
-                `District ${district.id} exceeds canvas height.`
-            );
-
-        }
-
-
-        total +=
-            capacity;
-
-    }
-
-
-    /*
-     * Ensure no two districts overlap.
-     */
-
-    for (
-        let i = 0;
-        i < districtList.length;
-        i++
-    ) {
-
-        for (
-            let j = i + 1;
-            j < districtList.length;
-            j++
-        ) {
-
-            if (
-                rectanglesOverlap(
-                    districtList[i],
-                    districtList[j]
-                )
-            ) {
-
-                throw new Error(
-                    `District overlap detected between ` +
-                    `${districtList[i].id} and ` +
-                    `${districtList[j].id}.`
-                );
-
-            }
-
-        }
-
-    }
-
+export function getCanvasConfig() {
 
     return {
 
-        valid: true,
-
-        configuredCapacity:
-            total,
-
-        logicalCanvasSize:
-            REQUIRED_PIXEL_COUNT
-
-    };
-
-}
-
-
-/* =========================================================
-   EXPORT CANVAS SUMMARY
-========================================================= */
-
-export function getCanvasSummary() {
-
-    const validation =
-        validateDistricts();
-
-
-    return {
+        totalPixels:
+            TOTAL_PIXELS,
 
         width:
             CANVAS_WIDTH,
@@ -1016,49 +937,39 @@ export function getCanvasSummary() {
         height:
             CANVAS_HEIGHT,
 
-        logicalPixels:
-            REQUIRED_PIXEL_COUNT,
-
-        configuredDistrictCapacity:
-            validation.configuredCapacity,
-
         districts:
             Object.values(
-                DISTRICTS
-            ).map(
-                district => ({
-
-                    id:
-                        district.id,
-
-                    name:
-                        district.name,
-
-                    x:
-                        district.x,
-
-                    y:
-                        district.y,
-
-                    width:
-                        district.width,
-
-                    height:
-                        district.height,
-
-                    capacity:
-                        getDistrictCapacity(
-                            district
-                        ),
-
-                    minimumPurchasePixels:
-                        district.minimumPurchasePixels,
-
-                    adultOnly:
-                        district.adultOnly
-
-                })
+                DISTRICT_LAYOUT
             )
+                .map(
+                    district => ({
+
+                        id:
+                            district.id,
+
+                        name:
+                            district.name,
+
+                        x:
+                            district.x,
+
+                        y:
+                            district.y,
+
+                        width:
+                            district.width,
+
+                        height:
+                            district.height,
+
+                        minimumPixels:
+                            district.minimumPixels,
+
+                        adultOnly:
+                            district.adultOnly
+
+                    })
+                )
 
     };
 
@@ -1066,25 +977,31 @@ export function getCanvasSummary() {
 
 
 /* =========================================================
-   STARTUP VALIDATION
+   DEFAULT EXPORT
 ========================================================= */
 
-try {
+export default {
 
-    validateDistricts();
+    TOTAL_PIXELS,
 
-} catch (error) {
+    CANVAS_WIDTH,
 
-    /*
-     * Fail loudly during deployment/development.
-     *
-     * A production deployment should not start with an
-     * invalid district configuration.
-     */
+    CANVAS_HEIGHT,
 
-    console.error(
-        "Canvas configuration error:",
-        error.message
-    );
+    DISTRICT_LAYOUT,
 
-}
+    pixelIdToCoordinate,
+
+    coordinateToPixelId,
+
+    getDistrict,
+
+    getDistrictAtCoordinate,
+
+    getDistrictArea,
+
+    pixelBelongsToDistrict,
+
+    getPixelRange
+
+};
