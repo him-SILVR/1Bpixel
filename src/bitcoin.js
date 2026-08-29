@@ -1,183 +1,178 @@
-/**
- * =========================================================
- * BILLION PIXEL CANVAS
- * Bitcoin Payment Engine
- * =========================================================
+"use strict";
+
+import {
+    PAYMENT,
+    PRICING
+} from "./config.js";
+
+
+/* =========================================================
+   BILLION PIXEL CANVAS
+   BITCOIN PAYMENT ENGINE
+========================================================= */
+
+
+/*
+ * MASTER PAYMENT RULE
  *
- * CORE COMMERCIAL RULE
+ * Pixel price:
  *
- * 1 PIXEL = $1 USD
+ *     $1 USD
  *
- * This price NEVER changes because of Bitcoin's price.
+ * forever.
+ *
+ * BTC is only the payment method.
  *
  * Example:
  *
- * 1 pixel       = $1
- * 100 pixels    = $100
- * 100,000 pixels = $100,000
+ * 100 pixels = $100
  *
- * BTC is only the payment currency.
+ * If BTC = $100,000:
  *
- * At the moment an order is created:
+ * $100 / $100,000 = 0.001 BTC
  *
- *     USD order value
- *            ↓
- *     current BTC/USD rate
- *            ↓
- *     exact BTC amount
- *            ↓
- *     amount is LOCKED into order
+ * If BTC = $200,000:
  *
- * The buyer must send that BTC amount to:
+ * $100 / $200,000 = 0.0005 BTC
  *
- * bc1qk8ehysk2fthd2p07zgdqz84tyvudkdn4565u40
- *
- * The receiving address belongs to the project.
- *
- * =========================================================
- *
- * IMPORTANT
- *
- * NEVER store a Bitcoin private key or seed phrase here.
- *
- * This application only needs the PUBLIC receiving address.
- *
- * =========================================================
+ * The pixel price NEVER changes.
  */
-
-"use strict";
 
 
 /* =========================================================
    CONSTANTS
 ========================================================= */
 
-export const PIXEL_PRICE_USD = 1;
-
-export const SATOSHIS_PER_BTC = 100000000;
-
-export const REQUIRED_CONFIRMATIONS = 3;
+const SATOSHIS_PER_BTC =
+    100_000_000;
 
 
-/*
- * YOUR PROJECT BTC ADDRESS
- */
-
-export const BTC_RECEIVING_ADDRESS =
-    "bc1qk8ehysk2fthd2p07zgdqz84tyvudkdn4565u40";
+const DEFAULT_CONFIRMATIONS =
+    PAYMENT.requiredConfirmations;
 
 
 /*
- * Public Bitcoin infrastructure.
- *
- * For launch we can use this API.
- * At larger scale, move to dedicated Bitcoin infrastructure.
+ * Mempool.space is used as the default public Bitcoin
+ * blockchain data source.
  */
 
-const DEFAULT_BITCOIN_API =
+const DEFAULT_API_BASE =
     "https://mempool.space/api";
 
 
-/* =========================================================
-   VALIDATION
-========================================================= */
+/*
+ * Quote validity.
+ *
+ * The buyer receives a locked BTC amount for the order.
+ *
+ * This does NOT change the $1 pixel price.
+ */
 
-export function normalizeTxId(
-    txid
-) {
-
-    if (
-        typeof txid !== "string"
-    ) {
-
-        return null;
-
-    }
-
-
-    const normalized =
-        txid
-            .trim()
-            .toLowerCase();
-
-
-    if (
-        !/^[a-f0-9]{64}$/.test(
-            normalized
-        )
-    ) {
-
-        return null;
-
-    }
-
-
-    return normalized;
-
-}
+const QUOTE_VALIDITY_SECONDS =
+    15 * 60;
 
 
 /* =========================================================
-   BTC ADDRESS
+   BITCOIN ADDRESS
 ========================================================= */
 
-export function getReceivingAddress(
+export function getBitcoinAddress(
     env
 ) {
 
     /*
-     * The configured environment value can override the
-     * default address after deployment.
+     * Environment variable is preferred.
+     *
+     * config.js contains the public fallback.
      */
 
-    const configured =
-        String(
-            env?.BTC_RECEIVING_ADDRESS || ""
-        ).trim();
-
-
-    if (
-        configured
-    ) {
-
-        return configured;
-
-    }
-
-
-    return BTC_RECEIVING_ADDRESS;
+    return String(
+        env?.BTC_RECEIVING_ADDRESS ||
+        PAYMENT.bitcoinAddress
+    )
+        .trim();
 
 }
 
 
 /* =========================================================
-   BTC ADDRESS BASIC CHECK
+   API BASE
 ========================================================= */
 
-export function isValidBitcoinAddress(
-    address
+function getApiBase(
+    env
 ) {
 
+    return String(
+        env?.BITCOIN_API_BASE ||
+        DEFAULT_API_BASE
+    )
+        .replace(
+            /\/+$/,
+            ""
+        );
+
+}
+
+
+/* =========================================================
+   BTC PRICE
+========================================================= */
+
+export async function getBitcoinUsdPrice(
+    env
+) {
+
+    const base =
+        getApiBase(
+            env
+        );
+
+
+    /*
+     * Mempool.space exposes a simple price endpoint.
+     */
+
+    const response =
+        await fetch(
+            `${base}/v1/prices`
+        );
+
+
     if (
-        typeof address !== "string"
+        !response.ok
     ) {
 
-        return false;
+        throw new Error(
+            "Unable to obtain the current Bitcoin/USD price."
+        );
 
     }
 
 
-    /*
-     * This project currently uses a Bitcoin mainnet Bech32
-     * address.
-     *
-     * Full address validation is additionally performed by
-     * the Bitcoin infrastructure/API.
-     */
+    const data =
+        await response.json();
 
-    return /^bc1[a-z0-9]{20,90}$/.test(
-        address.trim()
-    );
+
+    const price =
+        Number(
+            data.USD
+        );
+
+
+    if (
+        !Number.isFinite(price) ||
+        price <= 0
+    ) {
+
+        throw new Error(
+            "Bitcoin/USD price is invalid."
+        );
+
+    }
+
+
+    return price;
 
 }
 
@@ -186,71 +181,63 @@ export function isValidBitcoinAddress(
    USD → SATOSHIS
 ========================================================= */
 
-/*
- * This function converts a USD price into BTC satoshis
- * using the BTC/USD exchange rate captured at order creation.
- *
- * Example:
- *
- * $100 order
- *
- * BTC = $100,000
- *
- * 100 / 100,000 BTC
- *
- * = 0.001 BTC
- *
- * = 100,000 satoshis
- */
-
 export function usdToSatoshis(
-    usdAmount,
-    btcUsdRate
+    usd,
+    btcUsdPrice
 ) {
 
-    const usd =
+    const usdValue =
         Number(
-            usdAmount
+            usd
         );
 
-    const rate =
+
+    const btcPrice =
         Number(
-            btcUsdRate
+            btcUsdPrice
         );
 
 
     if (
-        !Number.isFinite(usd) ||
-        usd <= 0
+        !Number.isFinite(
+            usdValue
+        ) ||
+        usdValue <= 0
     ) {
 
         throw new Error(
-            "Invalid USD amount."
+            "USD amount must be greater than zero."
         );
 
     }
 
 
     if (
-        !Number.isFinite(rate) ||
-        rate <= 0
+        !Number.isFinite(
+            btcPrice
+        ) ||
+        btcPrice <= 0
     ) {
 
         throw new Error(
-            "Invalid BTC/USD exchange rate."
+            "Bitcoin/USD price must be greater than zero."
         );
 
     }
 
 
-    const btc =
-        usd /
-        rate;
-
+    /*
+     * Convert USD → BTC → satoshis.
+     *
+     * Math.round ensures an integer satoshi amount.
+     */
 
     const satoshis =
         Math.round(
-            btc *
+            (
+                usdValue /
+                btcPrice
+            ) *
             SATOSHIS_PER_BTC
         );
 
@@ -259,11 +246,11 @@ export function usdToSatoshis(
         !Number.isSafeInteger(
             satoshis
         ) ||
-        satoshis <= 0
+        satoshis < 1
     ) {
 
         throw new Error(
-            "Calculated BTC amount is invalid."
+            "Calculated Bitcoin amount is below one satoshi."
         );
 
     }
@@ -302,128 +289,26 @@ export function satoshisToBtc(
     }
 
 
-    const whole =
-        Math.floor(
-            value /
-            SATOSHIS_PER_BTC
-        );
-
-
-    const remainder =
-        value %
-        SATOSHIS_PER_BTC;
-
-
     return (
-        `${whole}.` +
-        String(
-            remainder
-        ).padStart(
-            8,
-            "0"
-        )
+        value /
+        SATOSHIS_PER_BTC
     );
 
 }
 
 
 /* =========================================================
-   GET BTC/USD RATE
-========================================================= */
-
-export async function getBtcUsdRate(
-    env
-) {
-
-    /*
-     * Use a configurable rate API if supplied.
-     */
-
-    const configuredUrl =
-        String(
-            env?.BTC_USD_RATE_URL || ""
-        ).trim();
-
-
-    const url =
-        configuredUrl ||
-        "https://mempool.space/api/v1/prices";
-
-
-    const response =
-        await fetch(
-            url,
-            {
-                headers: {
-                    "Accept":
-                        "application/json"
-                }
-            }
-        );
-
-
-    if (
-        !response.ok
-    ) {
-
-        throw new Error(
-            `BTC/USD price service returned HTTP ${response.status}.`
-        );
-
-    }
-
-
-    const data =
-        await response.json();
-
-
-    /*
-     * Mempool's price endpoint provides USD.
-     */
-
-    const rate =
-        Number(
-            data?.USD
-        );
-
-
-    if (
-        !Number.isFinite(rate) ||
-        rate <= 0
-    ) {
-
-        throw new Error(
-            "BTC/USD price service returned an invalid rate."
-        );
-
-    }
-
-
-    return rate;
-
-}
-
-
-/* =========================================================
-   CREATE LOCKED BTC QUOTE
+   CREATE BTC QUOTE
 ========================================================= */
 
 export async function createBitcoinQuote(
-    usdAmount,
+    priceUsd,
     env
 ) {
 
-    /*
-     * IMPORTANT:
-     *
-     * The USD price comes from the server.
-     *
-     * Never accept `btcAmount` from the browser.
-     */
-
     const usd =
         Number(
-            usdAmount
+            priceUsd
         );
 
 
@@ -431,27 +316,23 @@ export async function createBitcoinQuote(
         !Number.isSafeInteger(
             usd
         ) ||
-        usd <= 0
+        usd < 1
     ) {
 
         throw new Error(
-            "Invalid USD order amount."
+            "Invalid order price."
         );
 
     }
 
 
-    /*
-     * Retrieve the BTC price exactly when the order is created.
-     */
-
     const btcUsdRate =
-        await getBtcUsdRate(
+        await getBitcoinUsdPrice(
             env
         );
 
 
-    const satoshis =
+    const btcAmountSatoshis =
         usdToSatoshis(
             usd,
             btcUsdRate
@@ -460,54 +341,49 @@ export async function createBitcoinQuote(
 
     const btcAmount =
         satoshisToBtc(
-            satoshis
+            btcAmountSatoshis
         );
 
 
-    const receivingAddress =
-        getReceivingAddress(
-            env
+    const createdAt =
+        new Date();
+
+
+    const expiresAt =
+        new Date(
+            createdAt.getTime() +
+            QUOTE_VALIDITY_SECONDS *
+            1000
         );
-
-
-    if (
-        !isValidBitcoinAddress(
-            receivingAddress
-        )
-    ) {
-
-        throw new Error(
-            "Project Bitcoin receiving address is invalid."
-        );
-
-    }
 
 
     return {
 
-        usdAmount:
+        currency:
+            "BTC",
 
+        priceUsd:
             usd,
 
-        btcUsdRate:
+        btcUsdRate,
 
-            btcUsdRate,
+        btcAmountSatoshis,
 
-        btcAmount:
+        btcAmount,
 
-            btcAmount,
+        paymentAddress:
+            getBitcoinAddress(
+                env
+            ),
 
-        satoshis:
+        createdAt:
+            createdAt.toISOString(),
 
-            satoshis,
+        expiresAt:
+            expiresAt.toISOString(),
 
-        receivingAddress:
-
-            receivingAddress,
-
-        quotedAt:
-
-            new Date().toISOString()
+        validitySeconds:
+            QUOTE_VALIDITY_SECONDS
 
     };
 
@@ -515,7 +391,7 @@ export async function createBitcoinQuote(
 
 
 /* =========================================================
-   SAVE BTC QUOTE TO ORDER
+   ATTACH QUOTE TO ORDER
 ========================================================= */
 
 export async function attachBitcoinQuoteToOrder(
@@ -526,9 +402,16 @@ export async function attachBitcoinQuoteToOrder(
     }
 ) {
 
-    if (
-        !quote
-    ) {
+    if (!orderId) {
+
+        throw new Error(
+            "Order ID is required."
+        );
+
+    }
+
+
+    if (!quote) {
 
         throw new Error(
             "Bitcoin quote is required."
@@ -538,7 +421,8 @@ export async function attachBitcoinQuoteToOrder(
 
 
     /*
-     * Verify order.
+     * Verify the order exists and has not already been
+     * completed.
      */
 
     const order =
@@ -547,10 +431,6 @@ export async function attachBitcoinQuoteToOrder(
             SELECT
                 id,
                 price_usd,
-                payment_currency,
-                payment_address,
-                btc_amount_satoshis,
-                btc_rate_usd,
                 status
             FROM orders
             WHERE id = ?
@@ -572,50 +452,34 @@ export async function attachBitcoinQuoteToOrder(
     }
 
 
-    /*
-     * Never overwrite a locked quote.
-     *
-     * Once a buyer receives a BTC amount, that amount belongs
-     * to that order until the payment window expires.
-     */
-
     if (
-        order.btc_amount_satoshis
+        [
+            "PAID",
+            "COMPLETED",
+            "CANCELLED",
+            "EXPIRED"
+        ].includes(
+            order.status
+        )
     ) {
 
-        return {
-
-            orderId,
-
-            btcAmountSatoshis:
-                order.btc_amount_satoshis,
-
-            btcAmount:
-                satoshisToBtc(
-                    order.btc_amount_satoshis
-                ),
-
-            btcUsdRate:
-                order.btc_rate_usd,
-
-            paymentAddress:
-                order.payment_address
-
-        };
+        throw new Error(
+            "Bitcoin quote cannot be attached to this order."
+        );
 
     }
 
 
     /*
-     * Make sure quote matches server-side USD price.
+     * The quote must match the server-side order price.
      */
 
     if (
         Number(
-            quote.usdAmount
+            order.price_usd
         ) !==
         Number(
-            order.price_usd
+            quote.priceUsd
         )
     ) {
 
@@ -625,6 +489,10 @@ export async function attachBitcoinQuoteToOrder(
 
     }
 
+
+    /*
+     * Save the locked payment details directly on the order.
+     */
 
     await db.prepare(
         `
@@ -638,21 +506,24 @@ export async function attachBitcoinQuoteToOrder(
 
             payment_address = ?,
 
+            status = 'PAYMENT_PENDING',
+
             updated_at =
                 CURRENT_TIMESTAMP
 
         WHERE id = ?
 
-          AND btc_amount_satoshis IS NULL
+          AND status =
+              'RESERVED'
         `
     )
     .bind(
 
-        quote.satoshis,
+        quote.btcAmountSatoshis,
 
         quote.btcUsdRate,
 
-        quote.receivingAddress,
+        quote.paymentAddress,
 
         orderId
 
@@ -660,26 +531,137 @@ export async function attachBitcoinQuoteToOrder(
     .run();
 
 
-    return {
+    /*
+     * Create payment record.
+     */
+
+    const paymentId =
+        `btc_payment_${crypto.randomUUID()}`;
+
+
+    await db.prepare(
+        `
+        INSERT INTO bitcoin_payments (
+
+            id,
+
+            order_id,
+
+            payment_address,
+
+            expected_satoshis,
+
+            received_satoshis,
+
+            confirmation_count,
+
+            status
+
+        )
+
+        VALUES (
+
+            ?,
+
+            ?,
+
+            ?,
+
+            ?,
+
+            0,
+
+            0,
+
+            'AWAITING_PAYMENT'
+
+        )
+
+        ON CONFLICT(order_id)
+
+        DO UPDATE SET
+
+            payment_address =
+                excluded.payment_address,
+
+            expected_satoshis =
+                excluded.expected_satoshis,
+
+            updated_at =
+                CURRENT_TIMESTAMP
+        `
+    )
+    .bind(
+
+        paymentId,
 
         orderId,
 
-        btcAmountSatoshis:
-            quote.satoshis,
+        quote.paymentAddress,
 
-        btcAmount:
-            quote.btcAmount,
+        quote.btcAmountSatoshis
 
-        btcUsdRate:
-            quote.btcUsdRate,
+    )
+    .run();
 
-        paymentAddress:
-            quote.receivingAddress,
 
-        quotedAt:
-            quote.quotedAt
+    return quote;
 
-    };
+}
+
+
+/* =========================================================
+   GET ADDRESS TRANSACTIONS
+========================================================= */
+
+async function getAddressTransactions(
+    env,
+    address
+) {
+
+    const base =
+        getApiBase(
+            env
+        );
+
+
+    const response =
+        await fetch(
+            `${base}/address/${encodeURIComponent(
+                address
+            )}/txs`
+        );
+
+
+    if (
+        !response.ok
+    ) {
+
+        throw new Error(
+            "Unable to query Bitcoin transactions."
+        );
+
+    }
+
+
+    const transactions =
+        await response.json();
+
+
+    if (
+        !Array.isArray(
+            transactions
+        )
+    ) {
+
+        throw new Error(
+            "Bitcoin transaction response is invalid."
+        );
+
+    }
+
+
+    return transactions;
 
 }
 
@@ -688,57 +670,23 @@ export async function attachBitcoinQuoteToOrder(
    GET TRANSACTION
 ========================================================= */
 
-export async function getBitcoinTransaction(
-    txid,
-    env
+async function getTransaction(
+    env,
+    txid
 ) {
 
-    const normalized =
-        normalizeTxId(
-            txid
-        );
-
-
-    if (
-        !normalized
-    ) {
-
-        throw new Error(
-            "Invalid Bitcoin transaction ID."
-        );
-
-    }
-
-
     const base =
-        String(
-            env?.BITCOIN_API_BASE ||
-            DEFAULT_BITCOIN_API
-        ).replace(
-            /\/$/,
-            ""
+        getApiBase(
+            env
         );
 
 
     const response =
         await fetch(
-            `${base}/tx/${normalized}`,
-            {
-                headers: {
-                    "Accept":
-                        "application/json"
-                }
-            }
+            `${base}/tx/${encodeURIComponent(
+                txid
+            )}`
         );
-
-
-    if (
-        response.status === 404
-    ) {
-
-        return null;
-
-    }
 
 
     if (
@@ -746,7 +694,7 @@ export async function getBitcoinTransaction(
     ) {
 
         throw new Error(
-            `Bitcoin transaction service returned HTTP ${response.status}.`
+            "Unable to query Bitcoin transaction."
         );
 
     }
@@ -758,105 +706,22 @@ export async function getBitcoinTransaction(
 
 
 /* =========================================================
-   GET TRANSACTION STATUS
+   GET TIP HEIGHT
 ========================================================= */
 
-export async function getBitcoinTransactionStatus(
-    txid,
+async function getTipHeight(
     env
 ) {
 
-    const normalized =
-        normalizeTxId(
-            txid
-        );
-
-
-    if (
-        !normalized
-    ) {
-
-        throw new Error(
-            "Invalid Bitcoin transaction ID."
-        );
-
-    }
-
-
     const base =
-        String(
-            env?.BITCOIN_API_BASE ||
-            DEFAULT_BITCOIN_API
-        ).replace(
-            /\/$/,
-            ""
+        getApiBase(
+            env
         );
 
 
     const response =
         await fetch(
-            `${base}/tx/${normalized}/status`,
-            {
-                headers: {
-                    "Accept":
-                        "application/json"
-                }
-            }
-        );
-
-
-    if (
-        response.status === 404
-    ) {
-
-        return null;
-
-    }
-
-
-    if (
-        !response.ok
-    ) {
-
-        throw new Error(
-            `Bitcoin status service returned HTTP ${response.status}.`
-        );
-
-    }
-
-
-    return response.json();
-
-}
-
-
-/* =========================================================
-   CURRENT BLOCK HEIGHT
-========================================================= */
-
-export async function getCurrentBlockHeight(
-    env
-) {
-
-    const base =
-        String(
-            env?.BITCOIN_API_BASE ||
-            DEFAULT_BITCOIN_API
-        ).replace(
-            /\/$/,
-            ""
-        );
-
-
-    const response =
-        await fetch(
-            `${base}/blocks/tip/height`,
-            {
-                headers: {
-                    "Accept":
-                        "text/plain"
-                }
-            }
+            `${base}/blocks/tip/height`
         );
 
 
@@ -865,7 +730,7 @@ export async function getCurrentBlockHeight(
     ) {
 
         throw new Error(
-            `Bitcoin block service returned HTTP ${response.status}.`
+            "Unable to obtain Bitcoin block height."
         );
 
     }
@@ -873,9 +738,7 @@ export async function getCurrentBlockHeight(
 
     const height =
         Number(
-            (
-                await response.text()
-            ).trim()
+            await response.text()
         );
 
 
@@ -899,101 +762,63 @@ export async function getCurrentBlockHeight(
 
 
 /* =========================================================
-   FIND PAYMENT TO PROJECT ADDRESS
+   TRANSACTION RECEIVED AMOUNT
 ========================================================= */
 
-export function findPaymentToAddress(
+function getReceivedAmount(
     transaction,
-    receivingAddress
+    address
 ) {
 
-    if (
-        !transaction ||
-        !Array.isArray(
-            transaction.vout
-        )
-    ) {
-
-        return {
-
-            found:
-                false,
-
-            receivedSatoshis:
-                0
-
-        };
-
-    }
+    const outputs =
+        transaction?.vout || [];
 
 
-    let receivedSatoshis =
+    let received =
         0;
 
 
     for (
         const output
-        of transaction.vout
+        of outputs
     ) {
 
-        const address =
+        const scriptAddresses =
             output?.scriptpubkey_address;
 
 
         if (
-            address !==
-            receivingAddress
+            scriptAddresses ===
+            address
         ) {
 
-            continue;
+            received +=
+                Number(
+                    output.value || 0
+                );
 
         }
-
-
-        const value =
-            Number(
-                output?.value
-            );
-
-
-        if (
-            !Number.isSafeInteger(
-                value
-            ) ||
-            value <= 0
-        ) {
-
-            continue;
-
-        }
-
-
-        receivedSatoshis +=
-            value;
 
     }
 
 
-    return {
-
-        found:
-            receivedSatoshis > 0,
-
-        receivedSatoshis
-
-    };
+    return received;
 
 }
 
 
 /* =========================================================
-   CONFIRMATION COUNT
+   TRANSACTION CONFIRMATIONS
 ========================================================= */
 
-export function calculateConfirmations(
-    status,
-    currentBlockHeight
+function calculateConfirmations(
+    transaction,
+    tipHeight
 ) {
+
+    const status =
+        transaction?.status;
+
 
     if (
         !status?.confirmed
@@ -1021,18 +846,9 @@ export function calculateConfirmations(
     }
 
 
-    if (
-        currentBlockHeight <
-        blockHeight
-    ) {
-
-        return 0;
-
-    }
-
-
-    return (
-        currentBlockHeight -
+    return Math.max(
+        0,
+        tipHeight -
         blockHeight +
         1
     );
@@ -1041,7 +857,7 @@ export function calculateConfirmations(
 
 
 /* =========================================================
-   VERIFY PAYMENT
+   FIND PAYMENT
 ========================================================= */
 
 export async function verifyBitcoinPayment(
@@ -1049,30 +865,9 @@ export async function verifyBitcoinPayment(
     env,
     {
         orderId,
-        transactionId
+        transactionId = null
     }
 ) {
-
-    const txid =
-        normalizeTxId(
-            transactionId
-        );
-
-
-    if (
-        !txid
-    ) {
-
-        throw new Error(
-            "Invalid Bitcoin transaction ID."
-        );
-
-    }
-
-
-    /*
-     * Retrieve the order.
-     */
 
     const order =
         await db.prepare(
@@ -1099,152 +894,201 @@ export async function verifyBitcoinPayment(
     }
 
 
-    /*
-     * The BTC quote MUST already be locked.
-     */
-
     if (
-        !order.btc_amount_satoshis
+        order.status ===
+        "COMPLETED"
     ) {
 
-        throw new Error(
-            "BTC payment amount has not been locked for this order."
-        );
+        return {
+
+            orderId,
+
+            status:
+                "CONFIRMED",
+
+            confirmations:
+                DEFAULT_CONFIRMATIONS
+
+        };
 
     }
 
 
-    const expectedSatoshis =
-        Number(
-            order.btc_amount_satoshis
-        );
-
-
-    /*
-     * Check whether transaction was already used.
-     */
-
-    const existing =
+    const payment =
         await db.prepare(
             `
             SELECT
-                order_id
+                *
             FROM bitcoin_payments
-            WHERE transaction_id = ?
+            WHERE order_id = ?
             LIMIT 1
             `
         )
         .bind(
-            txid
+            orderId
         )
         .first();
 
 
-    if (
-        existing &&
-        existing.order_id !==
-        orderId
-    ) {
+    if (!payment) {
 
         throw new Error(
-            "This Bitcoin transaction has already been used."
+            "Bitcoin payment record not found."
         );
 
     }
 
 
     /*
-     * Retrieve transaction from Bitcoin infrastructure.
+     * Never trust a payment address supplied by the browser.
      */
 
-    const transaction =
-        await getBitcoinTransaction(
-            txid,
+    const paymentAddress =
+        payment.payment_address;
+
+
+    let transactions;
+
+
+    if (
+        transactionId
+    ) {
+
+        transactions = [
+
+            await getTransaction(
+                env,
+                transactionId
+            )
+
+        ];
+
+    } else {
+
+        transactions =
+            await getAddressTransactions(
+                env,
+                paymentAddress
+            );
+
+    }
+
+
+    const tipHeight =
+        await getTipHeight(
             env
         );
 
 
-    if (!transaction) {
+    let matchedTransaction =
+        null;
 
-        throw new Error(
-            "Bitcoin transaction was not found."
-        );
+    let receivedSatoshis =
+        0;
+
+    let confirmations =
+        0;
+
+
+    for (
+        const transaction
+        of transactions
+    ) {
+
+        const amount =
+            getReceivedAmount(
+                transaction,
+                paymentAddress
+            );
+
+
+        if (
+            amount <
+            Number(
+                payment.expected_satoshis
+            )
+        ) {
+
+            continue;
+
+        }
+
+
+        const txid =
+            transaction.txid;
+
+
+        const txConfirmations =
+            calculateConfirmations(
+                transaction,
+                tipHeight
+            );
+
+
+        matchedTransaction =
+            transaction;
+
+        receivedSatoshis =
+            amount;
+
+        confirmations =
+            txConfirmations;
+
+
+        /*
+         * A transaction with the required amount and the most
+         * confirmations is the strongest candidate.
+         */
+
+        if (
+            confirmations >=
+            DEFAULT_CONFIRMATIONS
+        ) {
+
+            break;
+
+        }
 
     }
 
 
-    /*
-     * Verify destination.
-     */
-
-    const payment =
-        findPaymentToAddress(
-            transaction,
-            order.payment_address
-        );
-
-
     if (
-        !payment.found
+        !matchedTransaction
     ) {
 
-        throw new Error(
-            "The transaction does not pay the project's Bitcoin address."
-        );
+        await db.prepare(
+            `
+            UPDATE bitcoin_payments
 
-    }
+            SET
 
+                status =
+                    'AWAITING_PAYMENT',
 
-    /*
-     * Underpayment:
-     *
-     * NEVER grant ownership.
-     */
+                updated_at =
+                    CURRENT_TIMESTAMP
 
-    if (
-        payment.receivedSatoshis <
-        expectedSatoshis
-    ) {
-
-        await recordPayment(
-            db,
-            {
-                orderId,
-
-                transactionId:
-                    txid,
-
-                expectedSatoshis,
-
-                receivedSatoshis:
-                    payment.receivedSatoshis,
-
-                confirmations:
-                    0,
-
-                status:
-                    "UNDERPAID"
-            }
-        );
+            WHERE order_id = ?
+            `
+        )
+        .bind(
+            orderId
+        )
+        .run();
 
 
         return {
 
-            valid:
-                false,
-
-            status:
-                "UNDERPAID",
-
             orderId,
 
-            transactionId:
-                txid,
+            status:
+                "AWAITING_PAYMENT",
 
-            expectedSatoshis,
+            expectedSatoshis:
+                payment.expected_satoshis,
 
             receivedSatoshis:
-                payment.receivedSatoshis,
+                0,
 
             confirmations:
                 0
@@ -1254,63 +1098,54 @@ export async function verifyBitcoinPayment(
     }
 
 
+    const transactionIdValue =
+        matchedTransaction.txid;
+
+
     /*
-     * Get blockchain confirmation state.
+     * Correct amount but insufficient confirmations.
      */
 
-    const transactionStatus =
-        await getBitcoinTransactionStatus(
-            txid,
-            env
-        );
+    if (
+        receivedSatoshis <
+        Number(
+            payment.expected_satoshis
+        )
+    ) {
 
+        await db.prepare(
+            `
+            UPDATE bitcoin_payments
 
-    const currentHeight =
-        await getCurrentBlockHeight(
-            env
-        );
+            SET
 
+                received_satoshis = ?,
 
-    const confirmations =
-        calculateConfirmations(
-            transactionStatus,
-            currentHeight
-        );
+                transaction_id = ?,
 
+                confirmation_count = ?,
 
-    const confirmed =
-        confirmations >=
-        REQUIRED_CONFIRMATIONS;
+                status = 'UNDERPAID',
 
+                updated_at =
+                    CURRENT_TIMESTAMP
 
-    await recordPayment(
-        db,
-        {
+            WHERE order_id = ?
+            `
+        )
+        .bind(
 
-            orderId,
+            receivedSatoshis,
 
-            transactionId:
-                txid,
-
-            expectedSatoshis,
-
-            receivedSatoshis:
-                payment.receivedSatoshis,
+            transactionIdValue,
 
             confirmations,
 
-            status:
-                confirmed
-                    ? "CONFIRMED"
-                    : "CONFIRMING"
+            orderId
 
-        }
-    );
+        )
+        .run();
 
-
-    if (
-        confirmed
-    ) {
 
         await db.prepare(
             `
@@ -1319,17 +1154,16 @@ export async function verifyBitcoinPayment(
             SET
 
                 status =
-                    'PAID',
+                    'UNDERPAID',
 
                 updated_at =
                     CURRENT_TIMESTAMP
 
             WHERE id = ?
 
-              AND status IN (
-                  'RESERVED',
-                  'PAYMENT_DETECTED',
-                  'CONFIRMING'
+              AND status NOT IN (
+                  'COMPLETED',
+                  'CANCELLED'
               )
             `
         )
@@ -1341,27 +1175,154 @@ export async function verifyBitcoinPayment(
 
         return {
 
-            valid:
-                true,
-
-            status:
-                "CONFIRMED",
-
             orderId,
 
-            transactionId:
-                txid,
+            status:
+                "UNDERPAID",
 
-            expectedSatoshis,
+            expectedSatoshis:
+                payment.expected_satoshis,
 
-            receivedSatoshis:
-                payment.receivedSatoshis,
+            receivedSatoshis,
 
             confirmations
 
         };
 
     }
+
+
+    if (
+        confirmations <
+        DEFAULT_CONFIRMATIONS
+    ) {
+
+        await db.prepare(
+            `
+            UPDATE bitcoin_payments
+
+            SET
+
+                received_satoshis = ?,
+
+                transaction_id = ?,
+
+                confirmation_count = ?,
+
+                status =
+                    'CONFIRMING',
+
+                updated_at =
+                    CURRENT_TIMESTAMP
+
+            WHERE order_id = ?
+            `
+        )
+        .bind(
+
+            receivedSatoshis,
+
+            transactionIdValue,
+
+            confirmations,
+
+            orderId
+
+        )
+        .run();
+
+
+        await db.prepare(
+            `
+            UPDATE orders
+
+            SET
+
+                status =
+                    'CONFIRMING',
+
+                updated_at =
+                    CURRENT_TIMESTAMP
+
+            WHERE id = ?
+
+              AND status NOT IN (
+                  'COMPLETED',
+                  'CANCELLED'
+              )
+            `
+        )
+        .bind(
+            orderId
+        )
+        .run();
+
+
+        return {
+
+            orderId,
+
+            status:
+                "CONFIRMING",
+
+            expectedSatoshis:
+                payment.expected_satoshis,
+
+            receivedSatoshis,
+
+            confirmations,
+
+            requiredConfirmations:
+                DEFAULT_CONFIRMATIONS,
+
+            transactionId:
+                transactionIdValue
+
+        };
+
+    }
+
+
+    /*
+     * Payment has the required amount and confirmations.
+     */
+
+    await db.prepare(
+        `
+        UPDATE bitcoin_payments
+
+        SET
+
+            received_satoshis = ?,
+
+            transaction_id = ?,
+
+            confirmation_count = ?,
+
+            status =
+                'CONFIRMED',
+
+            confirmed_at =
+                CURRENT_TIMESTAMP,
+
+            updated_at =
+                CURRENT_TIMESTAMP
+
+        WHERE order_id = ?
+        `
+    )
+    .bind(
+
+        receivedSatoshis,
+
+        transactionIdValue,
+
+        confirmations,
+
+        orderId
+
+    )
+    .run();
 
 
     await db.prepare(
@@ -1371,16 +1332,16 @@ export async function verifyBitcoinPayment(
         SET
 
             status =
-                'CONFIRMING',
+                'PAID',
 
             updated_at =
                 CURRENT_TIMESTAMP
 
         WHERE id = ?
 
-          AND status IN (
-              'RESERVED',
-              'PAYMENT_DETECTED'
+          AND status NOT IN (
+              'COMPLETED',
+              'CANCELLED'
           )
         `
     )
@@ -1392,23 +1353,23 @@ export async function verifyBitcoinPayment(
 
     return {
 
-        valid:
-            false,
-
-        status:
-            "CONFIRMING",
-
         orderId,
 
+        status:
+            "CONFIRMED",
+
+        expectedSatoshis:
+            payment.expected_satoshis,
+
+        receivedSatoshis,
+
+        confirmations,
+
+        requiredConfirmations:
+            DEFAULT_CONFIRMATIONS,
+
         transactionId:
-            txid,
-
-        expectedSatoshis,
-
-        receivedSatoshis:
-            payment.receivedSatoshis,
-
-        confirmations
+            transactionIdValue
 
     };
 
@@ -1416,147 +1377,117 @@ export async function verifyBitcoinPayment(
 
 
 /* =========================================================
-   RECORD PAYMENT
+   PAYMENT STATUS
 ========================================================= */
 
-async function recordPayment(
+export async function getBitcoinPaymentStatus(
     db,
-    {
-        orderId,
-        transactionId,
-        expectedSatoshis,
-        receivedSatoshis,
-        confirmations,
-        status
-    }
+    orderId
 ) {
 
-    const paymentId =
-        `btc_${crypto.randomUUID()}`;
-
-
-    await db.prepare(
-        `
-        INSERT INTO bitcoin_payments (
-
-            id,
-
-            order_id,
-
-            payment_address,
-
-            expected_satoshis,
-
-            received_satoshis,
-
-            transaction_id,
-
-            detected_at,
-
-            confirmation_count,
-
-            status
-
+    const payment =
+        await db.prepare(
+            `
+            SELECT
+                *
+            FROM bitcoin_payments
+            WHERE order_id = ?
+            LIMIT 1
+            `
         )
-
-        VALUES (
-
-            ?,
-
-            ?,
-
-            (
-                SELECT payment_address
-                FROM orders
-                WHERE id = ?
-            ),
-
-            ?,
-
-            ?,
-
-            ?,
-
-            CURRENT_TIMESTAMP,
-
-            ?,
-
-            ?
-
+        .bind(
+            orderId
         )
+        .first();
 
-        ON CONFLICT(order_id)
 
-        DO UPDATE SET
+    if (!payment) {
 
-            received_satoshis =
-                excluded.received_satoshis,
+        return {
 
-            transaction_id =
-                excluded.transaction_id,
+            orderId,
 
-            confirmation_count =
-                excluded.confirmation_count,
+            status:
+                "NOT_CREATED"
 
-            status =
-                excluded.status,
+        };
 
-            updated_at =
-                CURRENT_TIMESTAMP
-        `
-    )
-    .bind(
+    }
 
-        paymentId,
+
+    return {
 
         orderId,
 
-        orderId,
+        status:
+            payment.status,
 
-        expectedSatoshis,
+        paymentAddress:
+            payment.payment_address,
 
-        receivedSatoshis,
+        expectedSatoshis:
+            payment.expected_satoshis,
 
-        transactionId,
+        receivedSatoshis:
+            payment.received_satoshis,
 
-        confirmations,
+        transactionId:
+            payment.transaction_id,
 
-        status
+        confirmations:
+            payment.confirmation_count,
 
-    )
-    .run();
+        confirmedAt:
+            payment.confirmed_at
+
+    };
 
 }
 
 
 /* =========================================================
-   EXPORT CONFIGURATION
+   PUBLIC BITCOIN CONFIGURATION
 ========================================================= */
 
 export function getBitcoinConfiguration(
     env
 ) {
 
-    const address =
-        getReceivingAddress(
-            env
-        );
-
-
     return {
 
         currency:
             "BTC",
 
-        pixelPriceUsd:
-            PIXEL_PRICE_USD,
-
-        receivingAddress:
-            address,
+        paymentAddress:
+            getBitcoinAddress(
+                env
+            ),
 
         requiredConfirmations:
-            REQUIRED_CONFIRMATIONS
+            DEFAULT_CONFIRMATIONS,
+
+        priceCurrency:
+            "USD",
+
+        pricePerPixelUsd:
+            PRICING.pricePerPixelUsd,
+
+        priceIsPermanent:
+            PRICING.priceIsPermanent
 
     };
 
 }
+
+
+/* =========================================================
+   EXPORTS
+========================================================= */
+
+export {
+
+    SATOSHIS_PER_BTC,
+
+    QUOTE_VALIDITY_SECONDS
+
+};
