@@ -1,0 +1,73 @@
+# =========================================================
+# BILLION PIXEL CANVAS
+# Cloudflare Workers Configuration
+# =========================================================
+
+name = "billion-pixel-canvas"
+
+main = "src/worker.js"
+
+compatibility_date = "2026-08-29"
+
+workers_dev = true
+
+
+# =========================================================
+# STATIC WEBSITE
+# =========================================================
+
+[assets]
+
+directory = "."
+
+binding = "ASSETS"
+
+
+# =========================================================
+# PRODUCTION ENVIRONMENT
+# =========================================================
+
+[env.production]
+
+name = "billion-pixel-canvas"
+
+workers_dev = true
+
+
+# =========================================================
+# ENVIRONMENT VARIABLES
+# =========================================================
+
+[vars]
+
+PROJECT_NAME = "Billion Pixel Canvas"
+
+TOTAL_PIXELS = "1000000000"
+
+PIXEL_PRICE_USD = "1"
+
+PAYMENT_CURRENCY = "BTC"
+
+BTC_RECEIVING_ADDRESS = "bc1qk8ehysk2fthd2p07zgdqz84tyvudkdn4565u40"
+
+OWNERSHIP_POLICY = "PERMANENT_NO_RESALE_NO_TRANSFER"
+
+
+# =========================================================
+# IMPORTANT
+# =========================================================
+#
+# DO NOT put:
+#
+# - Bitcoin private keys
+# - seed phrases
+# - wallet passwords
+# - API secrets
+# - database passwords
+#
+# in this file.
+#
+# Secrets must be stored using Cloudflare's encrypted
+# secret storage.
+#
+# =========================================================
