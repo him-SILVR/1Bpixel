@@ -1,0 +1,121 @@
+{
+  "canvas": {
+    "name": "Billion Pixel Canvas",
+    "totalPixels": 1000000000,
+    "width": 31623,
+    "height": 31623,
+    "coordinateSystem": "ZERO_BASED_X_Y",
+    "origin": {
+      "x": 0,
+      "y": 0
+    },
+    "pixelPriceUsd": 1,
+    "currency": "USD"
+  },
+
+  "districts": [
+    {
+      "id": "people",
+      "name": "People's District",
+      "minimumPurchasePixels": 1,
+      "maximumPurchasePixels": null,
+      "adultOnly": false,
+
+      "region": {
+        "x": 0,
+        "y": 0,
+        "width": 15812,
+        "height": 31623
+      },
+
+      "pixelCapacity": 500000076,
+
+      "description": "The primary public district for individual owners and general creative expression."
+    },
+
+    {
+      "id": "giants",
+      "name": "Giants District",
+      "minimumPurchasePixels": 100000,
+      "maximumPurchasePixels": null,
+      "adultOnly": false,
+
+      "region": {
+        "x": 15812,
+        "y": 0,
+        "width": 7906,
+        "height": 31623
+      },
+
+      "pixelCapacity": 249991938,
+
+      "description": "A large-format district for major individual buyers, creators, organizations and brands."
+    },
+
+    {
+      "id": "youth",
+      "name": "Youth District",
+      "minimumPurchasePixels": 1,
+      "maximumPurchasePixels": null,
+      "adultOnly": false,
+
+      "region": {
+        "x": 23718,
+        "y": 0,
+        "width": 3953,
+        "height": 31623
+      },
+
+      "pixelCapacity": 124995219,
+
+      "description": "A dedicated family-friendly district for age-appropriate creative, educational and community content."
+    },
+
+    {
+      "id": "adult",
+      "name": "Adult District",
+      "minimumPurchasePixels": 100000,
+      "maximumPurchasePixels": null,
+      "adultOnly": true,
+
+      "region": {
+        "x": 27671,
+        "y": 0,
+        "width": 3952,
+        "height": 31623
+      },
+
+      "pixelCapacity": 124963767,
+
+      "description": "A separately identified 18+ district for legally permissible adult content."
+    }
+  ],
+
+  "ownership": {
+    "salePricePerPixelUsd": 1,
+    "resaleAllowed": false,
+    "transferAllowed": false,
+    "reissueAllowed": false,
+    "soldPixelsCanReturnToInventory": false
+  },
+
+  "districtRules": {
+    "people": {
+      "minimumPixels": 1
+    },
+
+    "giants": {
+      "minimumPixels": 100000
+    },
+
+    "youth": {
+      "minimumPixels": 1,
+      "familyFriendly": true
+    },
+
+    "adult": {
+      "minimumPixels": 100000,
+      "ageRestricted": true
+    }
+  }
+}
