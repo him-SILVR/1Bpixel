@@ -1,35 +1,74 @@
+"use strict";
+
 /**
  * =========================================================
  * BILLION PIXEL CANVAS
- * ORDER ENGINE
+ * ORDER + PURCHASE ENGINE
  * =========================================================
  *
- * MASTER RULE:
+ * PRICE:
  *
- * 1 PIXEL = $1 USD FOREVER
+ *     $1 USD = 1 pixel
  *
- * - Minimum purchase: 1
- * - No maximum purchase
- * - Buyer may purchase as many available pixels as desired
- * - Sold pixels can never be sold again
- * - No resale marketplace
- * - No auction
- * - No resale slots
+ * There is:
  *
- * BTC is only the payment currency.
+ *     - no resale
+ *     - no auction
+ *     - no price increase
+ *     - no maximum purchase quantity
+ *
+ * Once a pixel is SOLD, it remains SOLD permanently.
  *
  * =========================================================
  */
 
-"use strict";
+import {
+    PRICING
+} from "./config.js";
 
 import {
-    PRICING,
-    ORDER_STATUS,
-    OWNERSHIP_STATUS,
-    calculatePixelPriceUsd,
-    validateDistrictPurchase
-} from "./config.js";
+    reservePixels,
+    releaseReservations,
+    sellOrderPixels
+} from "./allocator.js";
+
+import {
+    getDistrict
+} from "./coordinates.js";
+
+
+/* =========================================================
+   ORDER STATES
+========================================================= */
+
+export const ORDER_STATUS =
+    Object.freeze({
+
+        RESERVED:
+            "RESERVED",
+
+        PAYMENT_PENDING:
+            "PAYMENT_PENDING",
+
+        CONFIRMING:
+            "CONFIRMING",
+
+        UNDERPAID:
+            "UNDERPAID",
+
+        PAID:
+            "PAID",
+
+        COMPLETED:
+            "COMPLETED",
+
+        CANCELLED:
+            "CANCELLED",
+
+        EXPIRED:
+            "EXPIRED"
+
+    });
 
 
 /* =========================================================
@@ -48,88 +87,101 @@ export async function createOrder(
     if (!userId) {
 
         throw new Error(
-            "User authentication is required."
+            "User ID is required."
         );
 
     }
 
 
-    /*
-     * Validate and normalize quantity.
-     */
-
-    const pixels =
-        Number(quantity);
-
-
-    if (
-        !Number.isSafeInteger(pixels) ||
-        pixels < PRICING.minimumPixels
-    ) {
-
-        throw new Error(
-            "Minimum purchase is 1 pixel."
-        );
-
-    }
-
-
-    /*
-     * Validate district-specific rules.
-     */
-
-    validateDistrictPurchase(
-        districtId,
-        pixels
-    );
-
-
-    /*
-     * IMPORTANT:
-     *
-     * Price is calculated ONLY on the server.
-     *
-     * Browser-supplied price is ignored.
-     */
-
-    const priceUsd =
-        calculatePixelPriceUsd(
-            pixels
-        );
-
-
-    /*
-     * Verify that enough pixels are actually available.
-     *
-     * The database allocator is responsible for selecting
-     * the exact coordinates.
-     */
-
-    const available =
-        await countAvailablePixels(
-            db,
+    const district =
+        getDistrict(
             districtId
         );
 
 
+    if (!district) {
+
+        throw new Error(
+            "Invalid district."
+        );
+
+    }
+
+
+    const amount =
+        Number(
+            quantity
+        );
+
+
+    /*
+     * Minimum is always one pixel.
+     *
+     * There is intentionally no maximum purchase limit.
+     */
+
     if (
-        available < pixels
+        !Number.isSafeInteger(
+            amount
+        ) ||
+        amount < 1
     ) {
 
         throw new Error(
-            `Only ${available.toLocaleString()} pixels remain available in this district.`
+            "You must purchase at least 1 pixel."
         );
 
     }
 
 
     /*
-     * Create order.
+     * Adult District has a minimum purchase of 100,000.
      */
+
+    if (
+        district.adultOnly &&
+        amount <
+            district.minimumPixels
+    ) {
+
+        throw new Error(
+            `The ${district.name} requires a minimum purchase of ${district.minimumPixels.toLocaleString()} pixels.`
+        );
+
+    }
+
+
+    /*
+     * The price is calculated server-side.
+     *
+     * Browser-supplied price is never trusted.
+     */
+
+    const priceUsd =
+        amount *
+        PRICING.pricePerPixelUsd;
+
+
+    if (
+        !Number.isSafeInteger(
+            priceUsd
+        )
+    ) {
+
+        throw new Error(
+            "Order value is outside supported limits."
+        );
+
+    }
+
 
     const orderId =
         `order_${crypto.randomUUID()}`;
 
+
+    /*
+     * Create order first.
+     */
 
     await db.prepare(
         `
@@ -184,9 +236,9 @@ export async function createOrder(
 
         userId,
 
-        districtId,
+        district.id,
 
-        pixels,
+        amount,
 
         priceUsd
 
@@ -195,11 +247,9 @@ export async function createOrder(
 
 
     /*
-     * Reserve the actual pixels.
+     * Reserve the requested pixels.
      *
-     * This must happen inside the database transaction/
-     * allocation layer so two simultaneous buyers cannot
-     * receive the same pixel.
+     * Reservations are temporary.
      */
 
     let allocation;
@@ -211,10 +261,17 @@ export async function createOrder(
             await reservePixels(
                 db,
                 {
+
+                    districtId:
+                        district.id,
+
+                    quantity:
+                        amount,
+
                     orderId,
-                    userId,
-                    districtId,
-                    quantity: pixels
+
+                    userId
+
                 }
             );
 
@@ -222,17 +279,14 @@ export async function createOrder(
         error
     ) {
 
-        /*
-         * If allocation fails, cancel the order.
-         */
-
         await db.prepare(
             `
             UPDATE orders
 
             SET
 
-                status = 'FAILED',
+                status =
+                    'CANCELLED',
 
                 updated_at =
                     CURRENT_TIMESTAMP
@@ -251,6 +305,97 @@ export async function createOrder(
     }
 
 
+    /*
+     * Store reservation records.
+     */
+
+    for (
+        const pixel
+        of allocation
+    ) {
+
+        await db.prepare(
+            `
+            INSERT INTO pixel_reservations (
+
+                id,
+
+                order_id,
+
+                user_id,
+
+                pixel_id,
+
+                district_id,
+
+                status,
+
+                created_at,
+
+                updated_at
+
+            )
+
+            VALUES (
+
+                ?,
+
+                ?,
+
+                ?,
+
+                ?,
+
+                ?,
+
+                'RESERVED',
+
+                CURRENT_TIMESTAMP,
+
+                CURRENT_TIMESTAMP
+
+            )
+            `
+        )
+        .bind(
+
+            `reservation_${crypto.randomUUID()}`,
+
+            orderId,
+
+            userId,
+
+            pixel.pixelId,
+
+            district.id
+
+        )
+        .run();
+
+    }
+
+
+    await db.prepare(
+        `
+        UPDATE orders
+
+        SET
+
+            status =
+                'RESERVED',
+
+            updated_at =
+                CURRENT_TIMESTAMP
+
+        WHERE id = ?
+        `
+    )
+    .bind(
+        orderId
+    )
+    .run();
+
+
     return {
 
         id:
@@ -258,10 +403,11 @@ export async function createOrder(
 
         userId,
 
-        districtId,
+        districtId:
+            district.id,
 
         quantity:
-            pixels,
+            amount,
 
         priceUsd,
 
@@ -282,13 +428,22 @@ export async function createOrder(
 
 
 /* =========================================================
-   GET ORDER
+   GET ORDER STATUS
 ========================================================= */
 
-export async function getOrder(
+export async function getOrderStatus(
     db,
     orderId
 ) {
+
+    if (!orderId) {
+
+        throw new Error(
+            "Order ID is required."
+        );
+
+    }
+
 
     const order =
         await db.prepare(
@@ -317,56 +472,31 @@ export async function getOrder(
         await db.prepare(
             `
             SELECT
-                id,
-                pixel_id,
-                district_id,
-                x,
-                y,
-                status
-            FROM pixel_reservations
-            WHERE order_id = ?
-            ORDER BY pixel_id
+
+                cp.pixel_id,
+
+                cp.district_id,
+
+                cp.x,
+
+                cp.y,
+
+                cp.status
+
+            FROM canvas_pixels cp
+
+            WHERE cp.reservation_order_id = ?
+
+               OR cp.sold_order_id = ?
+
+            ORDER BY cp.pixel_id
             `
         )
         .bind(
+            orderId,
             orderId
         )
         .all();
-
-
-    return {
-
-        order,
-
-        allocation:
-            allocation.results || []
-
-    };
-
-}
-
-
-/* =========================================================
-   ORDER STATUS
-========================================================= */
-
-export async function getOrderStatus(
-    db,
-    orderId
-) {
-
-    const result =
-        await getOrder(
-            db,
-            orderId
-        );
-
-
-    if (!result) {
-
-        return null;
-
-    }
 
 
     const payment =
@@ -387,337 +517,16 @@ export async function getOrderStatus(
 
     return {
 
-        order:
-            result.order,
+        order,
 
         allocation:
-            result.allocation,
+            allocation.results ||
+            [],
 
         payment:
             payment || null
 
     };
-
-}
-
-
-/* =========================================================
-   COUNT AVAILABLE PIXELS
-========================================================= */
-
-async function countAvailablePixels(
-    db,
-    districtId
-) {
-
-    const result =
-        await db.prepare(
-            `
-            SELECT
-                COUNT(*) AS available
-            FROM canvas_pixels
-            WHERE district_id = ?
-              AND status = 'AVAILABLE'
-            `
-        )
-        .bind(
-            districtId
-        )
-        .first();
-
-
-    return Number(
-        result?.available || 0
-    );
-
-}
-
-
-/* =========================================================
-   RESERVE PIXELS
-========================================================= */
-
-async function reservePixels(
-    db,
-    {
-        orderId,
-        userId,
-        districtId,
-        quantity
-    }
-) {
-
-    /*
-     * Select available pixels.
-     *
-     * The database is the source of truth.
-     */
-
-    const pixels =
-        await db.prepare(
-            `
-            SELECT
-                id,
-                pixel_id,
-                district_id,
-                x,
-                y
-            FROM canvas_pixels
-            WHERE district_id = ?
-              AND status = 'AVAILABLE'
-            ORDER BY pixel_id
-            LIMIT ?
-            `
-        )
-        .bind(
-            districtId,
-            quantity
-        )
-        .all();
-
-
-    const selected =
-        pixels.results || [];
-
-
-    if (
-        selected.length !== quantity
-    ) {
-
-        throw new Error(
-            "Not enough pixels are available."
-        );
-
-    }
-
-
-    /*
-     * Reserve every selected pixel.
-     *
-     * The UPDATE includes status='AVAILABLE'.
-     * Therefore an already-reserved/sold pixel cannot be
-     * silently overwritten.
-     */
-
-    for (
-        const pixel
-        of selected
-    ) {
-
-        const update =
-            await db.prepare(
-                `
-                UPDATE canvas_pixels
-
-                SET
-
-                    status =
-                        'RESERVED',
-
-                    reservation_order_id =
-                        ?,
-
-                    reserved_by =
-                        ?,
-
-                    reserved_at =
-                        CURRENT_TIMESTAMP,
-
-                    updated_at =
-                        CURRENT_TIMESTAMP
-
-                WHERE id = ?
-
-                  AND status =
-                      'AVAILABLE'
-                `
-            )
-            .bind(
-
-                orderId,
-
-                userId,
-
-                pixel.id
-
-            )
-            .run();
-
-
-        if (
-            update.meta?.changes !== 1
-        ) {
-
-            /*
-             * A concurrent request may have taken this pixel.
-             */
-
-            await releaseOrderReservations(
-                db,
-                orderId
-            );
-
-
-            throw new Error(
-                "Pixel allocation conflict. Please try again."
-            );
-
-        }
-
-
-        await db.prepare(
-            `
-            INSERT INTO pixel_reservations (
-
-                id,
-
-                order_id,
-
-                user_id,
-
-                pixel_id,
-
-                district_id,
-
-                x,
-
-                y,
-
-                status
-
-            )
-
-            VALUES (
-
-                ?,
-
-                ?,
-
-                ?,
-
-                ?,
-
-                ?,
-
-                ?,
-
-                ?,
-
-                'RESERVED'
-
-            )
-            `
-        )
-        .bind(
-
-            `reservation_${crypto.randomUUID()}`,
-
-            orderId,
-
-            userId,
-
-            pixel.pixel_id,
-
-            pixel.district_id,
-
-            pixel.x,
-
-            pixel.y
-
-        )
-        .run();
-
-    }
-
-
-    return {
-
-        count:
-            selected.length,
-
-        pixels:
-            selected.map(
-                pixel => ({
-
-                    pixelId:
-                        pixel.pixel_id,
-
-                    districtId:
-                        pixel.district_id,
-
-                    x:
-                        pixel.x,
-
-                    y:
-                        pixel.y
-
-                })
-            )
-
-    };
-
-}
-
-
-/* =========================================================
-   RELEASE RESERVATIONS
-========================================================= */
-
-async function releaseOrderReservations(
-    db,
-    orderId
-) {
-
-    await db.prepare(
-        `
-        UPDATE canvas_pixels
-
-        SET
-
-            status =
-                'AVAILABLE',
-
-            reservation_order_id =
-                NULL,
-
-            reserved_by =
-                NULL,
-
-            reserved_at =
-                NULL,
-
-            updated_at =
-                CURRENT_TIMESTAMP
-
-        WHERE reservation_order_id = ?
-          AND status = 'RESERVED'
-        `
-    )
-    .bind(
-        orderId
-    )
-    .run();
-
-
-    await db.prepare(
-        `
-        UPDATE pixel_reservations
-
-        SET
-
-            status =
-                'RELEASED'
-
-        WHERE order_id = ?
-
-          AND status =
-              'RESERVED'
-        `
-    )
-    .bind(
-        orderId
-    )
-    .run();
 
 }
 
@@ -732,10 +541,20 @@ export async function cancelOrder(
 ) {
 
     const order =
-        await getOrder(
-            db,
+        await db.prepare(
+            `
+            SELECT
+                id,
+                status
+            FROM orders
+            WHERE id = ?
+            LIMIT 1
+            `
+        )
+        .bind(
             orderId
-        );
+        )
+        .first();
 
 
     if (!order) {
@@ -747,26 +566,68 @@ export async function cancelOrder(
     }
 
 
+    /*
+     * Completed orders cannot be cancelled.
+     *
+     * Sold pixels are permanent.
+     */
+
     if (
-        [
-            "PAID",
-            "COMPLETED"
-        ].includes(
-            order.order.status
-        )
+        order.status ===
+        ORDER_STATUS.COMPLETED
     ) {
 
         throw new Error(
-            "A completed purchase cannot be cancelled."
+            "Completed orders cannot be cancelled."
         );
 
     }
 
 
-    await releaseOrderReservations(
+    if (
+        [
+            ORDER_STATUS.PAID,
+            ORDER_STATUS.COMPLETED
+        ].includes(
+            order.status
+        )
+    ) {
+
+        throw new Error(
+            "Paid orders cannot be cancelled through this endpoint."
+        );
+
+    }
+
+
+    await releaseReservations(
         db,
         orderId
     );
+
+
+    await db.prepare(
+        `
+        UPDATE pixel_reservations
+
+        SET
+
+            status =
+                'RELEASED',
+
+            updated_at =
+                CURRENT_TIMESTAMP
+
+        WHERE order_id = ?
+
+          AND status =
+              'RESERVED'
+        `
+    )
+    .bind(
+        orderId
+    )
+    .run();
 
 
     await db.prepare(
@@ -783,11 +644,9 @@ export async function cancelOrder(
 
         WHERE id = ?
 
-          AND status IN (
-              'RESERVED',
-              'PAYMENT_PENDING',
-              'PAYMENT_DETECTED',
-              'CONFIRMING'
+          AND status NOT IN (
+              'COMPLETED',
+              'CANCELLED'
           )
         `
     )
@@ -802,104 +661,7 @@ export async function cancelOrder(
         orderId,
 
         status:
-            "CANCELLED"
-
-    };
-
-}
-
-
-/* =========================================================
-   EXPIRE ORDERS
-========================================================= */
-
-export async function expireOrders(
-    db
-) {
-
-    /*
-     * Orders which remain unpaid eventually release their
-     * temporary reservations.
-     *
-     * IMPORTANT:
-     *
-     * Once an order is PAID/COMPLETED, its pixels are never
-     * returned to inventory.
-     */
-
-    const expired =
-        await db.prepare(
-            `
-            SELECT
-                id
-            FROM orders
-
-            WHERE status IN (
-                'RESERVED',
-                'PAYMENT_PENDING',
-                'PAYMENT_DETECTED',
-                'CONFIRMING'
-            )
-
-              AND created_at <
-                  datetime(
-                      'now',
-                      '-30 minutes'
-                  )
-            `
-        )
-        .all();
-
-
-    const orders =
-        expired.results || [];
-
-
-    for (
-        const order
-        of orders
-    ) {
-
-        await releaseOrderReservations(
-            db,
-            order.id
-        );
-
-
-        await db.prepare(
-            `
-            UPDATE orders
-
-            SET
-
-                status =
-                    'EXPIRED',
-
-                updated_at =
-                    CURRENT_TIMESTAMP
-
-            WHERE id = ?
-
-              AND status IN (
-                  'RESERVED',
-                  'PAYMENT_PENDING',
-                  'PAYMENT_DETECTED',
-                  'CONFIRMING'
-              )
-            `
-        )
-        .bind(
-            order.id
-        )
-        .run();
-
-    }
-
-
-    return {
-
-        expired:
-            orders.length
+            ORDER_STATUS.CANCELLED
 
     };
 
@@ -910,19 +672,32 @@ export async function expireOrders(
    COMPLETE PAID ORDER
 ========================================================= */
 
+/**
+ * This is the irreversible payment → ownership step.
+ */
+
 export async function completePaidOrder(
     db,
     orderId
 ) {
 
-    const result =
-        await getOrder(
-            db,
+    const order =
+        await db.prepare(
+            `
+            SELECT
+                *
+            FROM orders
+            WHERE id = ?
+            LIMIT 1
+            `
+        )
+        .bind(
             orderId
-        );
+        )
+        .first();
 
 
-    if (!result) {
+    if (!order) {
 
         throw new Error(
             "Order not found."
@@ -932,171 +707,152 @@ export async function completePaidOrder(
 
 
     /*
-     * Only confirmed/paid orders can become permanent.
+     * Idempotency:
+     *
+     * If the cron job sees the same payment twice, we simply
+     * return the already-completed order.
      */
 
     if (
-        ![
-            "PAID",
-            "COMPLETED"
-        ].includes(
-            result.order.status
-        )
+        order.status ===
+        ORDER_STATUS.COMPLETED
     ) {
 
-        throw new Error(
-            "Order has not been confirmed as paid."
+        return getOrderStatus(
+            db,
+            orderId
         );
 
     }
 
 
     if (
-        result.order.status ===
-        "COMPLETED"
+        order.status !==
+        ORDER_STATUS.PAID
     ) {
 
-        return result;
+        throw new Error(
+            "Order payment has not been confirmed."
+        );
 
     }
 
 
     /*
-     * Permanently sell every reserved pixel.
-     *
-     * The condition `status='RESERVED'` prevents a pixel
-     * from being accidentally sold twice.
+     * Confirm the payment record.
      */
 
-    const reservations =
+    const payment =
         await db.prepare(
             `
             SELECT
                 *
-            FROM pixel_reservations
+            FROM bitcoin_payments
             WHERE order_id = ?
-              AND status = 'RESERVED'
-            ORDER BY pixel_id
+            LIMIT 1
             `
         )
         .bind(
             orderId
         )
-        .all();
+        .first();
 
 
-    const pixels =
-        reservations.results || [];
-
-
-    if (
-        pixels.length !==
-        Number(
-            result.order.quantity
-        )
-    ) {
+    if (!payment) {
 
         throw new Error(
-            "Pixel reservation count does not match the order."
+            "Payment record not found."
         );
 
     }
 
 
-    for (
-        const pixel
-        of pixels
+    if (
+        payment.status !==
+        "CONFIRMED"
     ) {
 
-        const update =
-            await db.prepare(
-                `
-                UPDATE canvas_pixels
+        throw new Error(
+            "Bitcoin payment is not confirmed."
+        );
 
-                SET
+    }
 
-                    status =
-                        'SOLD',
 
-                    owner_user_id =
-                        ?,
+    /*
+     * Permanently sell all reserved pixels.
+     */
 
-                    reservation_order_id =
-                        NULL,
-
-                    reserved_by =
-                        NULL,
-
-                    reserved_at =
-                        NULL,
-
-                    sold_order_id =
-                        ?,
-
-                    sold_at =
-                        CURRENT_TIMESTAMP,
-
-                    updated_at =
-                        CURRENT_TIMESTAMP
-
-                WHERE pixel_id = ?
-
-                  AND status =
-                      'RESERVED'
-
-                  AND reservation_order_id =
-                      ?
-                `
-            )
-            .bind(
-
-                result.order.user_id,
+    const sold =
+        await sellOrderPixels(
+            db,
+            {
 
                 orderId,
 
-                pixel.pixel_id,
+                userId:
+                    order.user_id
 
-                orderId
+            }
+        );
 
+
+    if (
+        sold.length !==
+        Number(
+            order.quantity
+        )
+    ) {
+
+        throw new Error(
+            "Pixel allocation count does not match order quantity."
+        );
+
+    }
+
+
+    /*
+     * Create permanent ownership records.
+     *
+     * Ownership is immutable from the buyer's perspective.
+     */
+
+    for (
+        const pixel
+        of sold
+    ) {
+
+        const ownershipId =
+            `ownership_${crypto.randomUUID()}`;
+
+
+        const coordinate =
+            await db.prepare(
+                `
+                SELECT
+                    pixel_id,
+                    district_id,
+                    x,
+                    y
+                FROM canvas_pixels
+                WHERE pixel_id = ?
+                LIMIT 1
+                `
             )
-            .run();
+            .bind(
+                pixel.pixelId
+            )
+            .first();
 
 
-        if (
-            update.meta?.changes !== 1
-        ) {
+        if (!coordinate) {
 
             throw new Error(
-                "Permanent pixel allocation conflict."
+                "Sold pixel record disappeared."
             );
 
         }
 
-
-        await db.prepare(
-            `
-            UPDATE pixel_reservations
-
-            SET
-
-                status =
-                    'SOLD'
-
-            WHERE id = ?
-
-              AND status =
-                  'RESERVED'
-            `
-        )
-        .bind(
-            pixel.id
-        )
-        .run();
-
-
-        /*
-         * Create permanent ownership record.
-         */
 
         await db.prepare(
             `
@@ -1116,7 +872,9 @@ export async function completePaidOrder(
 
                 y,
 
-                status
+                status,
+
+                created_at
 
             )
 
@@ -1136,26 +894,62 @@ export async function completePaidOrder(
 
                 ?,
 
-                'SOLD'
+                'SOLD',
+
+                CURRENT_TIMESTAMP
 
             )
             `
         )
         .bind(
 
-            `ownership_${crypto.randomUUID()}`,
+            ownershipId,
 
-            result.order.user_id,
+            order.user_id,
 
             orderId,
 
-            pixel.pixel_id,
+            coordinate.pixel_id,
 
-            pixel.district_id,
+            coordinate.district_id,
 
-            pixel.x,
+            coordinate.x,
 
-            pixel.y
+            coordinate.y
+
+        )
+        .run();
+
+
+        /*
+         * Update reservation ledger.
+         */
+
+        await db.prepare(
+            `
+            UPDATE pixel_reservations
+
+            SET
+
+                status =
+                    'SOLD',
+
+                updated_at =
+                    CURRENT_TIMESTAMP
+
+            WHERE order_id = ?
+
+              AND pixel_id = ?
+
+              AND status =
+                  'RESERVED'
+            `
+        )
+        .bind(
+
+            orderId,
+
+            coordinate.pixel_id
 
         )
         .run();
@@ -1164,7 +958,7 @@ export async function completePaidOrder(
 
 
     /*
-     * Mark order completed.
+     * Mark order permanently completed.
      */
 
     await db.prepare(
@@ -1194,7 +988,68 @@ export async function completePaidOrder(
     .run();
 
 
-    return getOrder(
+    /*
+     * Record completion event.
+     */
+
+    await db.prepare(
+        `
+        INSERT INTO audit_log (
+
+            id,
+
+            event_type,
+
+            entity_type,
+
+            entity_id,
+
+            metadata_json
+
+        )
+
+        VALUES (
+
+            ?,
+
+            'ORDER_COMPLETED',
+
+            'ORDER',
+
+            ?,
+
+            ?
+
+        )
+        `
+    )
+    .bind(
+
+        `audit_order_${crypto.randomUUID()}`,
+
+        orderId,
+
+        JSON.stringify({
+
+            quantity:
+                order.quantity,
+
+            priceUsd:
+                order.price_usd,
+
+            userId:
+                order.user_id,
+
+            bitcoinTransaction:
+                payment.transaction_id
+
+        })
+
+    )
+    .run();
+
+
+    return getOrderStatus(
         db,
         orderId
     );
@@ -1203,41 +1058,37 @@ export async function completePaidOrder(
 
 
 /* =========================================================
-   FIND PIXEL
+   CALCULATE ORDER PRICE
 ========================================================= */
 
-export async function findPixel(
-    db,
-    districtId,
-    x,
-    y
+export function calculateOrderPrice(
+    quantity
 ) {
 
-    const pixel =
-        await db.prepare(
-            `
-            SELECT
-                *
-            FROM canvas_pixels
-
-            WHERE district_id = ?
-
-              AND x = ?
-
-              AND y = ?
-
-            LIMIT 1
-            `
-        )
-        .bind(
-            districtId,
-            x,
-            y
-        )
-        .first();
+    const amount =
+        Number(
+            quantity
+        );
 
 
-    return pixel || null;
+    if (
+        !Number.isSafeInteger(
+            amount
+        ) ||
+        amount < 1
+    ) {
+
+        throw new Error(
+            "Quantity must be at least 1."
+        );
+
+    }
+
+
+    return (
+        amount *
+        PRICING.pricePerPixelUsd
+    );
 
 }
 
@@ -1248,8 +1099,14 @@ export async function findPixel(
 
 export {
 
-    reservePixels,
+    calculateOrderPrice,
 
-    releaseOrderReservations
+    createOrder,
+
+    getOrderStatus,
+
+    cancelOrder,
+
+    completePaidOrder
 
 };
