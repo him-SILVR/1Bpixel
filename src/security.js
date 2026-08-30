@@ -1,893 +1,56 @@
+"use strict";
+
+
 /**
  * =========================================================
  * BILLION PIXEL CANVAS
- * Security Layer
+ * SECURITY LAYER
  * =========================================================
  *
- * Responsibilities:
+ * Provides:
  *
  * - Security headers
  * - CORS protection
- * - CSRF protection
- * - Rate limiting
- * - Request validation
- * - Input size limits
- * - Basic abuse prevention
- * - Safe JSON responses
+ * - Basic request validation
+ * - Origin validation
+ * - Rate limiting using Cloudflare KV
+ * - CSRF protection for state-changing requests
  *
- * IMPORTANT
+ * IMPORTANT:
  *
- * This is one layer of security, not a guarantee that the
- * application is invulnerable.
- *
- * Financial and ownership operations must remain server-side.
- * =========================================================
+ * This layer does NOT replace Cloudflare WAF, Turnstile,
+ * database constraints, authentication, or application-level
+ * authorization.
  */
-
-"use strict";
 
 
 /* =========================================================
    CONSTANTS
 ========================================================= */
 
-export const MAX_REQUEST_BYTES =
+const STATE_CHANGING_METHODS =
+    new Set([
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+    ]);
+
+
+const MAX_REQUEST_BYTES =
     1_000_000;
 
-export const MAX_JSON_BYTES =
-    500_000;
 
-export const MAX_TEXT_LENGTH =
-    5_000;
-
-export const MAX_USERNAME_LENGTH =
-    30;
-
-export const MAX_URL_LENGTH =
-    2_048;
+const RATE_LIMIT_WINDOW_SECONDS =
+    60;
 
 
-/*
- * Rate limits.
- */
-
-export const RATE_LIMITS = Object.freeze({
-
-    login: {
-        requests: 10,
-        windowSeconds: 900
-    },
-
-    register: {
-        requests: 5,
-        windowSeconds: 900
-    },
-
-    order: {
-        requests: 20,
-        windowSeconds: 300
-    },
-
-    payment: {
-        requests: 20,
-        windowSeconds: 300
-    },
-
-    content: {
-        requests: 30,
-        windowSeconds: 300
-    },
-
-    report: {
-        requests: 20,
-        windowSeconds: 300
-    },
-
-    general: {
-        requests: 120,
-        windowSeconds: 60
-    }
-
-});
+const RATE_LIMIT_MAX_REQUESTS =
+    60;
 
 
 /* =========================================================
-   CLIENT IP
-========================================================= */
-
-export function getClientIp(
-    request
-) {
-
-    /*
-     * Cloudflare supplies CF-Connecting-IP.
-     */
-
-    const cloudflareIp =
-        request.headers.get(
-            "CF-Connecting-IP"
-        );
-
-
-    if (
-        cloudflareIp
-    ) {
-
-        return cloudflareIp.trim();
-
-    }
-
-
-    /*
-     * Fallback for local development.
-     */
-
-    return (
-        request.headers.get(
-            "X-Forwarded-For"
-        ) ||
-        "unknown"
-    )
-        .split(",")[0]
-        .trim();
-
-}
-
-
-/* =========================================================
-   HASH IDENTIFIER
-========================================================= */
-
-export async function hashIdentifier(
-    value
-) {
-
-    const encoded =
-        new TextEncoder().encode(
-            String(value)
-        );
-
-
-    const digest =
-        await crypto.subtle.digest(
-            "SHA-256",
-            encoded
-        );
-
-
-    return Array.from(
-        new Uint8Array(
-            digest
-        )
-    )
-        .map(
-            byte =>
-                byte
-                    .toString(16)
-                    .padStart(2, "0")
-        )
-        .join("");
-
-}
-
-
-/* =========================================================
-   RATE LIMIT KEY
-========================================================= */
-
-export async function createRateLimitKey(
-    request,
-    category
-) {
-
-    const ip =
-        getClientIp(
-            request
-        );
-
-
-    const hashedIp =
-        await hashIdentifier(
-            ip
-        );
-
-
-    return `rate:${category}:${hashedIp}`;
-
-}
-
-
-/* =========================================================
-   RATE LIMIT
-========================================================= */
-
-export async function checkRateLimit(
-    db,
-    request,
-    category = "general"
-) {
-
-    const config =
-        RATE_LIMITS[category] ||
-        RATE_LIMITS.general;
-
-
-    const key =
-        await createRateLimitKey(
-            request,
-            category
-        );
-
-
-    const now =
-        Date.now();
-
-
-    const existing =
-        await db.prepare(
-            `
-            SELECT
-                key,
-                request_count,
-                window_start
-            FROM rate_limit_buckets
-            WHERE key = ?
-            LIMIT 1
-            `
-        )
-        .bind(
-            key
-        )
-        .first();
-
-
-    /*
-     * No bucket yet.
-     */
-
-    if (
-        !existing
-    ) {
-
-        await db.prepare(
-            `
-            INSERT INTO rate_limit_buckets (
-
-                key,
-
-                request_count,
-
-                window_start
-
-            )
-
-            VALUES (
-
-                ?,
-
-                1,
-
-                CURRENT_TIMESTAMP
-
-            )
-            `
-        )
-        .bind(
-            key
-        )
-        .run();
-
-
-        return {
-
-            allowed:
-                true,
-
-            remaining:
-                config.requests - 1,
-
-            limit:
-                config.requests
-
-        };
-
-    }
-
-
-    const windowStart =
-        new Date(
-            existing.window_start
-        )
-            .getTime();
-
-
-    const elapsed =
-        (
-            now -
-            windowStart
-        ) /
-        1000;
-
-
-    /*
-     * Start a new window.
-     */
-
-    if (
-        elapsed >=
-        config.windowSeconds
-    ) {
-
-        await db.prepare(
-            `
-            UPDATE rate_limit_buckets
-
-            SET
-
-                request_count = 1,
-
-                window_start =
-                    CURRENT_TIMESTAMP,
-
-                updated_at =
-                    CURRENT_TIMESTAMP
-
-            WHERE key = ?
-            `
-        )
-        .bind(
-            key
-        )
-        .run();
-
-
-        return {
-
-            allowed:
-                true,
-
-            remaining:
-                config.requests - 1,
-
-            limit:
-                config.requests
-
-        };
-
-    }
-
-
-    /*
-     * Existing active window.
-     */
-
-    const count =
-        Number(
-            existing.request_count
-        );
-
-
-    if (
-        count >=
-        config.requests
-    ) {
-
-        return {
-
-            allowed:
-                false,
-
-            remaining:
-                0,
-
-            limit:
-                config.requests,
-
-            retryAfter:
-                Math.ceil(
-                    config.windowSeconds -
-                    elapsed
-                )
-
-        };
-
-    }
-
-
-    await db.prepare(
-        `
-        UPDATE rate_limit_buckets
-
-        SET
-
-            request_count =
-                request_count + 1,
-
-            updated_at =
-                CURRENT_TIMESTAMP
-
-        WHERE key = ?
-        `
-    )
-    .bind(
-        key
-    )
-    .run();
-
-
-    return {
-
-        allowed:
-            true,
-
-        remaining:
-            config.requests -
-            count -
-            1,
-
-        limit:
-            config.requests
-
-    };
-
-}
-
-
-/* =========================================================
-   REQUIRE RATE LIMIT
-========================================================= */
-
-export async function requireRateLimit(
-    db,
-    request,
-    category
-) {
-
-    const result =
-        await checkRateLimit(
-            db,
-            request,
-            category
-        );
-
-
-    if (
-        !result.allowed
-    ) {
-
-        const error =
-            new Error(
-                "Too many requests. Please try again later."
-            );
-
-
-        error.status =
-            429;
-
-
-        error.retryAfter =
-            result.retryAfter;
-
-
-        throw error;
-
-    }
-
-
-    return result;
-
-}
-
-
-/* =========================================================
-   REQUEST SIZE
-========================================================= */
-
-export function validateRequestSize(
-    request
-) {
-
-    const length =
-        request.headers.get(
-            "Content-Length"
-        );
-
-
-    if (
-        !length
-    ) {
-
-        return true;
-
-    }
-
-
-    const bytes =
-        Number(
-            length
-        );
-
-
-    if (
-        !Number.isFinite(bytes)
-    ) {
-
-        throw new Error(
-            "Invalid Content-Length."
-        );
-
-    }
-
-
-    if (
-        bytes >
-        MAX_REQUEST_BYTES
-    ) {
-
-        const error =
-            new Error(
-                "Request body is too large."
-            );
-
-
-        error.status =
-            413;
-
-
-        throw error;
-
-    }
-
-
-    return true;
-
-}
-
-
-/* =========================================================
-   JSON BODY
-========================================================= */
-
-export async function readJsonBody(
-    request
-) {
-
-    validateRequestSize(
-        request
-    );
-
-
-    const contentType =
-        request.headers.get(
-            "Content-Type"
-        ) ||
-        "";
-
-
-    if (
-        !contentType
-            .toLowerCase()
-            .includes(
-                "application/json"
-            )
-    ) {
-
-        const error =
-            new Error(
-                "Content-Type must be application/json."
-            );
-
-
-        error.status =
-            415;
-
-
-        throw error;
-
-    }
-
-
-    const body =
-        await request.text();
-
-
-    if (
-        new TextEncoder()
-            .encode(body)
-            .byteLength >
-        MAX_JSON_BYTES
-    ) {
-
-        const error =
-            new Error(
-                "JSON body is too large."
-            );
-
-
-        error.status =
-            413;
-
-
-        throw error;
-
-    }
-
-
-    if (
-        !body.trim()
-    ) {
-
-        throw new Error(
-            "Request body is empty."
-        );
-
-    }
-
-
-    try {
-
-        return JSON.parse(
-            body
-        );
-
-    } catch {
-
-        const error =
-            new Error(
-                "Invalid JSON."
-            );
-
-
-        error.status =
-            400;
-
-
-        throw error;
-
-    }
-
-}
-
-
-/* =========================================================
-   STRING SANITIZATION
-========================================================= */
-
-export function sanitizeText(
-    value,
-    maxLength = MAX_TEXT_LENGTH
-) {
-
-    if (
-        value === null ||
-        value === undefined
-    ) {
-
-        return "";
-
-    }
-
-
-    if (
-        typeof value !== "string"
-    ) {
-
-        throw new Error(
-            "Expected text value."
-        );
-
-    }
-
-
-    return value
-        .normalize("NFKC")
-        .trim()
-        .slice(
-            0,
-            maxLength
-        );
-
-}
-
-
-/* =========================================================
-   USERNAME SANITIZATION
-========================================================= */
-
-export function sanitizeUsername(
-    value
-) {
-
-    const username =
-        sanitizeText(
-            value,
-            MAX_USERNAME_LENGTH
-        )
-            .toLowerCase();
-
-
-    if (
-        !/^[a-z0-9_]{3,30}$/.test(
-            username
-        )
-    ) {
-
-        throw new Error(
-            "Invalid username."
-        );
-
-    }
-
-
-    return username;
-
-}
-
-
-/* =========================================================
-   URL VALIDATION
-========================================================= */
-
-export function validateHttpUrl(
-    value
-) {
-
-    const url =
-        sanitizeText(
-            value,
-            MAX_URL_LENGTH
-        );
-
-
-    if (
-        !url
-    ) {
-
-        throw new Error(
-            "URL is required."
-        );
-
-    }
-
-
-    let parsed;
-
-
-    try {
-
-        parsed =
-            new URL(
-                url
-            );
-
-    } catch {
-
-        throw new Error(
-            "Invalid URL."
-        );
-
-    }
-
-
-    if (
-        parsed.protocol !== "https:" &&
-        parsed.protocol !== "http:"
-    ) {
-
-        throw new Error(
-            "Only HTTP and HTTPS URLs are allowed."
-        );
-
-    }
-
-
-    return parsed.toString();
-
-}
-
-
-/* =========================================================
-   COORDINATE VALIDATION
-========================================================= */
-
-export function validateCoordinates(
-    x,
-    y
-) {
-
-    const coordinateX =
-        Number(x);
-
-    const coordinateY =
-        Number(y);
-
-
-    if (
-        !Number.isSafeInteger(
-            coordinateX
-        ) ||
-        !Number.isSafeInteger(
-            coordinateY
-        )
-    ) {
-
-        throw new Error(
-            "Invalid canvas coordinates."
-        );
-
-    }
-
-
-    if (
-        coordinateX < 0 ||
-        coordinateY < 0
-    ) {
-
-        throw new Error(
-            "Canvas coordinates cannot be negative."
-        );
-
-    }
-
-
-    return {
-
-        x:
-            coordinateX,
-
-        y:
-            coordinateY
-
-    };
-
-}
-
-
-/* =========================================================
-   QUANTITY VALIDATION
-========================================================= */
-
-export function validatePixelQuantity(
-    quantity
-) {
-
-    const value =
-        Number(
-            quantity
-        );
-
-
-    if (
-        !Number.isSafeInteger(
-            value
-        )
-    ) {
-
-        throw new Error(
-            "Pixel quantity must be a whole number."
-        );
-
-    }
-
-
-    if (
-        value < 1
-    ) {
-
-        throw new Error(
-            "Minimum purchase is 1 pixel."
-        );
-
-    }
-
-
-    return value;
-
-}
-
-
-/* =========================================================
-   CONTENT SECURITY POLICY
+   SECURITY HEADERS
 ========================================================= */
 
 export function securityHeaders() {
@@ -916,29 +79,28 @@ export function securityHeaders() {
             [
                 "default-src 'self'",
 
+                "script-src 'self'",
+
+                "style-src 'self'",
+
+                "img-src 'self' data: https:",
+
+                "font-src 'self' https:",
+
+                "connect-src 'self' https:",
+
+                "frame-ancestors 'none'",
+
                 "base-uri 'self'",
 
                 "form-action 'self'",
 
-                "frame-ancestors 'none'",
+                "object-src 'none'"
 
-                "object-src 'none'",
+            ].join("; "),
 
-                "script-src 'self'",
-
-                "style-src 'self' 'unsafe-inline'",
-
-                "img-src 'self' data: https:",
-
-                "font-src 'self' data:",
-
-                "connect-src 'self' https:",
-
-                "media-src 'self' https:",
-
-                "frame-src 'self' https:"
-
-            ].join("; ")
+        "Strict-Transport-Security":
+            "max-age=31536000; includeSubDomains"
 
     };
 
@@ -960,69 +122,135 @@ export function corsHeaders(
         );
 
 
-    const configuredOrigin =
-        String(
-            env?.PUBLIC_ORIGIN || ""
-        )
-            .trim();
-
-
     /*
-     * For production, PUBLIC_ORIGIN should be the exact
-     * Cloudflare Pages/Workers site origin.
+     * Only allow the configured production origin.
+     *
+     * If no origin is supplied, no CORS header is required.
      */
 
-    const allowedOrigin =
-        configuredOrigin ||
-        origin ||
-        "";
+    if (!origin) {
 
-
-    const headers = {
-
-        "Vary":
-            "Origin",
-
-        "Access-Control-Allow-Methods":
-            "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-
-        "Access-Control-Allow-Headers":
-            "Content-Type, X-CSRF-Token",
-
-        "Access-Control-Allow-Credentials":
-            "true",
-
-        "Access-Control-Max-Age":
-            "86400"
-
-    };
-
-
-    if (
-        allowedOrigin
-    ) {
-
-        headers[
-            "Access-Control-Allow-Origin"
-        ] =
-            allowedOrigin;
+        return {};
 
     }
 
 
-    return headers;
+    const allowedOrigin =
+        String(
+            env?.PUBLIC_ORIGIN ||
+            ""
+        )
+            .trim();
+
+
+    if (
+        allowedOrigin &&
+        origin === allowedOrigin
+    ) {
+
+        return {
+
+            "Access-Control-Allow-Origin":
+                origin,
+
+            "Access-Control-Allow-Credentials":
+                "true",
+
+            "Access-Control-Allow-Methods":
+                "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+
+            "Access-Control-Allow-Headers":
+                "Content-Type, X-CSRF-Token",
+
+            "Vary":
+                "Origin"
+
+        };
+
+    }
+
+
+    /*
+     * Do not reflect arbitrary origins.
+     */
+
+    return {};
 
 }
 
 
 /* =========================================================
-   CORS ORIGIN CHECK
+   CORS PREFLIGHT
 ========================================================= */
 
-export function assertAllowedOrigin(
+export function handleCorsPreflight(
     request,
     env
 ) {
+
+    const headers =
+        corsHeaders(
+            request,
+            env
+        );
+
+
+    if (
+        !headers[
+            "Access-Control-Allow-Origin"
+        ]
+    ) {
+
+        return new Response(
+            "CORS origin not allowed.",
+            {
+                status: 403,
+                headers: {
+                    ...securityHeaders()
+                }
+            }
+        );
+
+    }
+
+
+    return new Response(
+        null,
+        {
+            status: 204,
+            headers: {
+                ...securityHeaders(),
+                ...headers
+            }
+        }
+    );
+
+}
+
+
+/* =========================================================
+   ORIGIN VALIDATION
+========================================================= */
+
+export function validateOrigin(
+    request,
+    env
+) {
+
+    const method =
+        request.method.toUpperCase();
+
+
+    if (
+        !STATE_CHANGING_METHODS.has(
+            method
+        )
+    ) {
+
+        return true;
+
+    }
+
 
     const origin =
         request.headers.get(
@@ -1031,64 +259,42 @@ export function assertAllowedOrigin(
 
 
     /*
-     * Requests without Origin are permitted because ordinary
-     * server-to-server requests and some navigations do not
-     * include it.
+     * API clients without an Origin header may still exist,
+     * so absence alone is not treated as invalid.
      */
 
-    if (
-        !origin
-    ) {
+    if (!origin) {
 
         return true;
 
     }
 
 
-    const configured =
+    const configuredOrigin =
         String(
-            env?.PUBLIC_ORIGIN || ""
+            env?.PUBLIC_ORIGIN ||
+            ""
         )
             .trim();
 
 
     if (
-        !configured
+        !configuredOrigin
     ) {
 
         /*
-         * Do not allow arbitrary browser origins in production.
-         *
-         * During development, same-origin requests normally
-         * don't require an Origin comparison.
+         * Production deployment should always configure this.
          */
 
-        return true;
+        return false;
 
     }
 
 
-    if (
-        origin !==
-        configured
-    ) {
-
-        const error =
-            new Error(
-                "Origin is not allowed."
-            );
-
-
-        error.status =
-            403;
-
-
-        throw error;
-
-    }
-
-
-    return true;
+    return (
+        origin ===
+        configuredOrigin
+    );
 
 }
 
@@ -1097,29 +303,21 @@ export function assertAllowedOrigin(
    CSRF TOKEN
 ========================================================= */
 
-export async function createCsrfToken(
-    sessionToken
-) {
+export function generateCsrfToken() {
 
-    if (
-        !sessionToken
-    ) {
-
-        throw new Error(
-            "Session token is required."
+    const bytes =
+        new Uint8Array(
+            32
         );
 
-    }
+
+    crypto.getRandomValues(
+        bytes
+    );
 
 
-    /*
-     * Deterministic token derived from the session secret.
-     *
-     * The raw session token is never returned by this helper.
-     */
-
-    return hashIdentifier(
-        `csrf:${sessionToken}`
+    return bytesToBase64Url(
+        bytes
     );
 
 }
@@ -1129,22 +327,18 @@ export async function createCsrfToken(
    CSRF VALIDATION
 ========================================================= */
 
-export async function validateCsrf(
+export function validateCsrf(
     request,
-    sessionToken
+    expectedToken
 ) {
 
-    /*
-     * Safe methods do not modify server state.
-     */
+    const method =
+        request.method.toUpperCase();
+
 
     if (
-        [
-            "GET",
-            "HEAD",
-            "OPTIONS"
-        ].includes(
-            request.method.toUpperCase()
+        !STATE_CHANGING_METHODS.has(
+            method
         )
     ) {
 
@@ -1153,78 +347,409 @@ export async function validateCsrf(
     }
 
 
-    const supplied =
+    /*
+     * Authentication endpoints that establish a session may
+     * be protected by Origin/SameSite controls instead.
+     *
+     * For authenticated state-changing operations, require
+     * an explicit CSRF token.
+     */
+
+    if (
+        !expectedToken
+    ) {
+
+        return false;
+
+    }
+
+
+    const suppliedToken =
         request.headers.get(
             "X-CSRF-Token"
         );
 
 
     if (
-        !supplied
+        !suppliedToken
     ) {
 
-        const error =
-            new Error(
-                "CSRF token is required."
-            );
-
-
-        error.status =
-            403;
-
-
-        throw error;
+        return false;
 
     }
 
 
-    const expected =
-        await createCsrfToken(
-            sessionToken
-        );
-
-
-    if (
-        supplied !==
-        expected
-    ) {
-
-        const error =
-            new Error(
-                "Invalid CSRF token."
-            );
-
-
-        error.status =
-            403;
-
-
-        throw error;
-
-    }
-
-
-    return true;
+    return constantTimeEqual(
+        suppliedToken,
+        expectedToken
+    );
 
 }
 
 
 /* =========================================================
-   SAFE JSON RESPONSE
+   REQUEST SIZE
 ========================================================= */
 
-export function jsonResponse(
-    data,
+export function validateRequestSize(
+    request
+) {
+
+    const lengthHeader =
+        request.headers.get(
+            "Content-Length"
+        );
+
+
+    if (!lengthHeader) {
+
+        return true;
+
+    }
+
+
+    const length =
+        Number(
+            lengthHeader
+        );
+
+
+    if (
+        !Number.isSafeInteger(
+            length
+        )
+    ) {
+
+        return false;
+
+    }
+
+
+    return (
+        length <=
+        MAX_REQUEST_BYTES
+    );
+
+}
+
+
+/* =========================================================
+   RATE LIMIT
+========================================================= */
+
+/**
+ * Basic KV-based rate limiter.
+ *
+ * Bind a KV namespace as:
+ *
+ * RATE_LIMIT
+ *
+ * in Cloudflare.
+ *
+ * If the binding is unavailable, the function returns true.
+ *
+ * Production deployment should configure the KV binding.
+ */
+
+export async function rateLimit(
+    request,
+    env,
     {
-        status = 200,
-        headers = {}
+        limit =
+            RATE_LIMIT_MAX_REQUESTS,
+
+        windowSeconds =
+            RATE_LIMIT_WINDOW_SECONDS,
+
+        keyPrefix =
+            "api"
     } = {}
 ) {
 
-    return new Response(
-        JSON.stringify(
-            data
+    if (
+        !env?.RATE_LIMIT
+    ) {
+
+        /*
+         * Development fallback.
+         */
+
+        return {
+
+            allowed:
+                true,
+
+            remaining:
+                limit
+
+        };
+
+    }
+
+
+    const ip =
+        request.headers.get(
+            "CF-Connecting-IP"
+        ) ||
+        "unknown";
+
+
+    const now =
+        Math.floor(
+            Date.now() /
+            1000
+        );
+
+
+    const bucket =
+        Math.floor(
+            now /
+            windowSeconds
+        );
+
+
+    const key =
+        `${keyPrefix}:${ip}:${bucket}`;
+
+
+    const existing =
+        await env.RATE_LIMIT.get(
+            key
+        );
+
+
+    const count =
+        Number(
+            existing ||
+            0
+        );
+
+
+    if (
+        count >=
+        limit
+    ) {
+
+        return {
+
+            allowed:
+                false,
+
+            remaining:
+                0,
+
+            retryAfter:
+                windowSeconds -
+                (
+                    now %
+                    windowSeconds
+                )
+
+        };
+
+    }
+
+
+    await env.RATE_LIMIT.put(
+        key,
+        String(
+            count + 1
         ),
+        {
+            expirationTtl:
+                windowSeconds + 5
+        }
+    );
+
+
+    return {
+
+        allowed:
+            true,
+
+        remaining:
+            Math.max(
+                0,
+                limit -
+                count -
+                1
+            )
+
+    };
+
+}
+
+
+/* =========================================================
+   SECURITY CHECK
+========================================================= */
+
+export async function securityCheck(
+    request,
+    env,
+    {
+        csrfToken = null,
+
+        rateLimitOptions = {}
+
+    } = {}
+) {
+
+    /*
+     * Request size.
+     */
+
+    if (
+        !validateRequestSize(
+            request
+        )
+    ) {
+
+        return {
+
+            allowed:
+                false,
+
+            response:
+                securityError(
+                    "Request is too large.",
+                    413
+                )
+
+        };
+
+    }
+
+
+    /*
+     * Origin.
+     */
+
+    if (
+        !validateOrigin(
+            request,
+            env
+        )
+    ) {
+
+        return {
+
+            allowed:
+                false,
+
+            response:
+                securityError(
+                    "Request origin is not allowed.",
+                    403
+                )
+
+        };
+
+    }
+
+
+    /*
+     * CSRF.
+     */
+
+    if (
+        !validateCsrf(
+            request,
+            csrfToken
+        )
+    ) {
+
+        return {
+
+            allowed:
+                false,
+
+            response:
+                securityError(
+                    "CSRF validation failed.",
+                    403
+                )
+
+        };
+
+    }
+
+
+    /*
+     * Rate limit.
+     */
+
+    const rate =
+        await rateLimit(
+            request,
+            env,
+            rateLimitOptions
+        );
+
+
+    if (
+        !rate.allowed
+    ) {
+
+        const response =
+            securityError(
+                "Too many requests.",
+                429
+            );
+
+
+        response.headers.set(
+            "Retry-After",
+            String(
+                rate.retryAfter ||
+                60
+            )
+        );
+
+
+        return {
+
+            allowed:
+                false,
+
+            response
+
+        };
+
+    }
+
+
+    return {
+
+        allowed:
+            true,
+
+        remaining:
+            rate.remaining
+
+    };
+
+}
+
+
+/* =========================================================
+   SECURITY ERROR
+========================================================= */
+
+function securityError(
+    message,
+    status
+) {
+
+    return new Response(
+
+        JSON.stringify({
+
+            error:
+                message
+
+        }),
+
         {
 
             status,
@@ -1234,153 +759,134 @@ export function jsonResponse(
                 "Content-Type":
                     "application/json; charset=utf-8",
 
-                ...securityHeaders(),
-
-                ...headers
+                ...securityHeaders()
 
             }
 
         }
+
     );
 
 }
 
 
 /* =========================================================
-   ERROR RESPONSE
+   CONSTANT-TIME COMPARISON
 ========================================================= */
 
-export function errorResponse(
-    error
+function constantTimeEqual(
+    a,
+    b
 ) {
 
-    const status =
-        Number(
-            error?.status
-        ) || 500;
-
-
-    /*
-     * Never expose stack traces to users.
-     */
-
-    const message =
-        status >= 500
-            ? "Internal server error."
-            : (
-                error?.message ||
-                "Request failed."
-            );
-
-
-    const headers = {};
-
-
     if (
-        error?.retryAfter
+        typeof a !== "string" ||
+        typeof b !== "string"
     ) {
 
-        headers[
-            "Retry-After"
-        ] =
-            String(
-                error.retryAfter
-            );
+        return false;
 
     }
 
 
-    return jsonResponse(
-        {
+    let difference =
+        a.length ^
+        b.length;
 
-            error:
-                message
 
-        },
-        {
+    const length =
+        Math.max(
+            a.length,
+            b.length
+        );
 
-            status,
 
-            headers
+    for (
+        let i = 0;
+        i < length;
+        i++
+    ) {
 
-        }
-    );
+        const left =
+            i < a.length
+                ? a.charCodeAt(i)
+                : 0;
+
+
+        const right =
+            i < b.length
+                ? b.charCodeAt(i)
+                : 0;
+
+
+        difference |=
+            left ^
+            right;
+
+    }
+
+
+    return difference === 0;
 
 }
 
 
 /* =========================================================
-   METHOD CHECK
+   BASE64URL
 ========================================================= */
 
-export function requireMethod(
-    request,
-    allowedMethods
+function bytesToBase64Url(
+    bytes
 ) {
 
-    const method =
-        request.method.toUpperCase();
+    let binary =
+        "";
 
 
-    if (
-        !allowedMethods
-            .map(
-                value =>
-                    value.toUpperCase()
-            )
-            .includes(
-                method
-            )
+    for (
+        const byte
+        of bytes
     ) {
 
-        const error =
-            new Error(
-                "HTTP method is not allowed."
+        binary +=
+            String.fromCharCode(
+                byte
             );
-
-
-        error.status =
-            405;
-
-
-        throw error;
 
     }
 
 
-    return true;
-
-}
-
-
-/* =========================================================
-   SECURITY CLEANUP
-========================================================= */
-
-export async function cleanupRateLimitBuckets(
-    db
-) {
-
-    /*
-     * Keep the table from growing forever.
-     *
-     * Old buckets are not useful.
-     */
-
-    await db.prepare(
-        `
-        DELETE FROM rate_limit_buckets
-
-        WHERE updated_at <
-            datetime(
-                'now',
-                '-24 hours'
-            )
-        `
+    return btoa(
+        binary
     )
-    .run();
-
-
-    return true;
+        .replace(
+            /\+/g,
+            "-"
+        )
+        .replace(
+            /\//g,
+            "_"
+        )
+        .replace(
+            /=+$/,
+            ""
+        );
 
 }
+
+
+/* =========================================================
+   EXPORTS
+========================================================= */
+
+export {
+
+    STATE_CHANGING_METHODS,
+
+    MAX_REQUEST_BYTES,
+
+    RATE_LIMIT_WINDOW_SECONDS,
+
+    RATE_LIMIT_MAX_REQUESTS
+
+};
