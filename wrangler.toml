@@ -1,17 +1,39 @@
+# =========================================================
+# BILLION PIXEL CANVAS
+# CLOUDFLARE WORKER CONFIGURATION
+# =========================================================
+
 name = "billion-pixel-canvas"
 
-main = "src/worker.js"
+main = "src/index.js"
 
-compatibility_date = "2026-08-30"
+compatibility_date = "2026-08-31"
 
 
 # =========================================================
-# CLOUDFLARE STATIC ASSETS
+# WORKER
 # =========================================================
 
-[assets]
+workers_dev = true
 
-directory = "./"
+
+# =========================================================
+# ENVIRONMENT VARIABLES
+# =========================================================
+#
+# DO NOT put private keys, seed phrases or passwords here.
+#
+# The Bitcoin receiving address is public and can safely be
+# configured as an environment variable.
+#
+
+[vars]
+
+PUBLIC_ORIGIN = "https://YOUR-PAGES-DOMAIN.pages.dev"
+
+BTC_RECEIVING_ADDRESS = "bc1qk8ehysk2fthd2p07zgdqz84tyvudkdn4565u40"
+
+BITCOIN_API_BASE = "https://mempool.space/api"
 
 
 # =========================================================
@@ -26,18 +48,38 @@ database_name = "billion-pixel-canvas"
 
 database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 
+migrations_dir = "migrations"
+
 
 # =========================================================
-# PRODUCTION VARIABLES
+# KV — RATE LIMITING
 # =========================================================
 
-[vars]
+[[kv_namespaces]]
 
-BTC_RECEIVING_ADDRESS = "bc1qk8ehysk2fthd2p07zgdqz84tyvudkdn4565u40"
+binding = "RATE_LIMIT"
 
-BITCOIN_API_BASE = "https://mempool.space/api"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 
-PUBLIC_ORIGIN = "https://REPLACE_WITH_YOUR_CLOUDFLARE_DOMAIN"
+
+# =========================================================
+# CRON
+# =========================================================
+#
+# Every 5 minutes:
+#
+# - check pending Bitcoin payments
+# - process confirmations
+# - complete paid orders
+# - release expired reservations
+# - clean expired sessions/tokens
+#
+
+[triggers]
+
+crons = [
+    "*/5 * * * *"
+]
 
 
 # =========================================================
