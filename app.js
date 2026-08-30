@@ -1,1088 +1,1155 @@
-/* =========================================================
-   BILLION PIXEL CANVAS
-   Frontend Application
-========================================================= */
-
 "use strict";
 
+import {
+    getPublicConfig
+} from "./config.js";
 
-/* =========================================================
-   PROJECT CONSTANTS
-========================================================= */
+import {
+    getCanvasStatistics,
+    getPixelState,
+    findOwnershipAt
+} from "./allocator.js";
 
-const TOTAL_PIXELS = 1_000_000_000;
+import {
+    createOrder,
+    getOrderStatus,
+    cancelOrder
+} from "./orders.js";
 
-const BTC_RECEIVING_ADDRESS =
-    "bc1qk8ehysk2fthd2p07zgdqz84tyvudkdn4565u40";
+import {
+    createBitcoinQuote,
+    attachBitcoinQuoteToOrder,
+    getBitcoinPaymentStatus,
+    verifyBitcoinPayment
+} from "./bitcoin.js";
 
-
-/*
-    IMPORTANT
-
-    This frontend NEVER decides whether a pixel is actually sold.
-
-    Real ownership must be confirmed by the production backend.
-
-    The current application uses temporary frontend state so the
-    interface can be developed before connecting the backend.
-*/
-
-
-/* =========================================================
-   DISTRICTS
-========================================================= */
-
-const DISTRICTS = {
-
-    people: {
-        name: "People's District",
-        minimumPixels: 1,
-        minimumPrice: 1,
-        adultOnly: false
-    },
-
-    giants: {
-        name: "Giants District",
-        minimumPixels: 100000,
-        minimumPrice: 100000,
-        adultOnly: false
-    },
-
-    youth: {
-        name: "Youth District",
-        minimumPixels: 1,
-        minimumPrice: 1,
-        adultOnly: false
-    },
-
-    adult: {
-        name: "Adult District",
-        minimumPixels: 100000,
-        minimumPrice: 100000,
-        adultOnly: true
-    }
-
-};
+import {
+    createContent,
+    getContent,
+    listOwnershipContent,
+    publishContent,
+    hideContent,
+    reportContent
+} from "./content.js";
 
 
 /* =========================================================
-   APPLICATION STATE
+   API ROUTER
 ========================================================= */
 
-const state = {
-
-    selectedPixels: 0,
-
-    selectedDistrict: "people",
-
-    zoom: 1,
-
-    panX: 0,
-
-    panY: 0,
-
-    isDragging: false,
-
-    pointerStartX: 0,
-
-    pointerStartY: 0,
-
-    pointerLastX: 0,
-
-    pointerLastY: 0,
-
-    movedDuringPointer: false,
-
-    soldPixels: 0
-
-};
-
-
-/* =========================================================
-   DOM HELPERS
-========================================================= */
-
-function getElement(id) {
-
-    return document.getElementById(id);
-
-}
-
-
-/* =========================================================
-   DOM REFERENCES
-========================================================= */
-
-const canvasViewport =
-    getElement("canvasViewport");
-
-const canvasWorld =
-    getElement("canvasWorld");
-
-const districtSelect =
-    getElement("districtSelect");
-
-const selectionText =
-    getElement("selectionText");
-
-const clearSelectionButton =
-    getElement("clearSelection");
-
-const buySelectedButton =
-    getElement("buySelectedButton");
-
-const headerBuyButton =
-    getElement("headerBuyButton");
-
-const exploreButton =
-    getElement("exploreButton");
-
-const finalBuyButton =
-    getElement("finalBuyButton");
-
-const zoomInButton =
-    getElement("zoomIn");
-
-const zoomOutButton =
-    getElement("zoomOut");
-
-const zoomResetButton =
-    getElement("zoomReset");
-
-const checkoutOverlay =
-    getElement("checkoutOverlay");
-
-const closeCheckoutButton =
-    getElement("closeCheckout");
-
-const continueCheckoutButton =
-    getElement("continueCheckout");
-
-const pixelQuantityInput =
-    getElement("pixelQuantity");
-
-const checkoutDistrict =
-    getElement("checkoutDistrict");
-
-const checkoutPixels =
-    getElement("checkoutPixels");
-
-const checkoutPrice =
-    getElement("checkoutPrice");
-
-const pixelsSold =
-    getElement("pixelsSold");
-
-const pixelsAvailable =
-    getElement("pixelsAvailable");
-
-const totalRaised =
-    getElement("totalRaised");
-
-
-/* =========================================================
-   NUMBER FORMATTING
-========================================================= */
-
-function formatNumber(number) {
-
-    return new Intl.NumberFormat("en-US").format(number);
-
-}
-
-
-function formatCurrency(number) {
-
-    return new Intl.NumberFormat(
-        "en-US",
-        {
-            style: "currency",
-            currency: "USD",
-            maximumFractionDigits: 0
-        }
-    ).format(number);
-
-}
-
-
-/* =========================================================
-   STATISTICS
-========================================================= */
-
-function updateStatistics() {
-
-    const available =
-        TOTAL_PIXELS - state.soldPixels;
-
-    pixelsSold.textContent =
-        formatNumber(state.soldPixels);
-
-    pixelsAvailable.textContent =
-        formatNumber(Math.max(0, available));
-
-    totalRaised.textContent =
-        formatCurrency(state.soldPixels);
-
-}
-
-
-/* =========================================================
-   DISTRICT
-========================================================= */
-
-function getCurrentDistrict() {
-
-    return DISTRICTS[state.selectedDistrict];
-
-}
-
-
-/* =========================================================
-   SELECTION
-========================================================= */
-
-function updateSelectionDisplay() {
-
-    const count =
-        state.selectedPixels;
-
-    selectionText.textContent =
-        `${formatNumber(count)} pixel${count === 1 ? "" : "s"} selected`;
-
-    if (count === 0) {
-
-        buySelectedButton.textContent =
-            "Buy Selected Pixels";
-
-        return;
-
-    }
-
-    buySelectedButton.textContent =
-        `Buy ${formatNumber(count)} Pixel${count === 1 ? "" : "s"}`;
-
-}
-
-
-function setSelectedPixels(number) {
-
-    let count =
-        Math.floor(Number(number));
-
-    if (!Number.isFinite(count)) {
-
-        count = 0;
-
-    }
-
-    count =
-        Math.max(0, count);
-
-    const district =
-        getCurrentDistrict();
-
-    const available =
-        TOTAL_PIXELS - state.soldPixels;
-
-    if (count > available) {
-
-        count = available;
-
-    }
-
-    /*
-        District minimum is checked when opening checkout,
-        not here, because zero selection is allowed in UI.
-    */
-
-    state.selectedPixels =
-        count;
-
-    updateSelectionDisplay();
-
-}
-
-
-function clearSelection() {
-
-    state.selectedPixels =
-        0;
-
-    updateSelectionDisplay();
-
-}
-
-
-/* =========================================================
-   DISTRICT SELECTION
-========================================================= */
-
-function changeDistrict(value) {
-
-    if (!DISTRICTS[value]) {
-
-        return;
-
-    }
-
-    state.selectedDistrict =
-        value;
-
-    clearSelection();
-
-}
-
-
-/* =========================================================
-   CANVAS TRANSFORMATION
-========================================================= */
-
-function updateCanvasTransform() {
-
-    canvasWorld.style.transform =
-        `
-        translate(
-            calc(-50% + ${state.panX}px),
-            calc(-50% + ${state.panY}px)
-        )
-        scale(${state.zoom})
-        `;
-
-}
-
-
-/* =========================================================
-   ZOOM
-========================================================= */
-
-function zoomIn() {
-
-    state.zoom =
-        Math.min(
-            20,
-            state.zoom * 1.25
+export async function handleApi(
+    request,
+    env,
+    ctx
+) {
+
+    const url =
+        new URL(
+            request.url
         );
 
-    updateCanvasTransform();
 
-}
-
-
-function zoomOut() {
-
-    state.zoom =
-        Math.max(
-            0.2,
-            state.zoom / 1.25
-        );
-
-    updateCanvasTransform();
-
-}
-
-
-function resetZoom() {
-
-    state.zoom =
-        1;
-
-    state.panX =
-        0;
-
-    state.panY =
-        0;
-
-    updateCanvasTransform();
-
-}
-
-
-/* =========================================================
-   CANVAS DRAGGING
-========================================================= */
-
-function handlePointerDown(event) {
-
-    state.isDragging =
-        true;
-
-    state.movedDuringPointer =
-        false;
-
-    state.pointerStartX =
-        event.clientX;
-
-    state.pointerStartY =
-        event.clientY;
-
-    state.pointerLastX =
-        event.clientX;
-
-    state.pointerLastY =
-        event.clientY;
-
-    canvasViewport.classList.add(
-        "dragging"
-    );
-
-    try {
-
-        canvasViewport.setPointerCapture(
-            event.pointerId
-        );
-
-    } catch (error) {
-
-        /*
-            Pointer capture isn't available in every
-            browser implementation.
-        */
-
-    }
-
-}
-
-
-function handlePointerMove(event) {
-
-    if (!state.isDragging) {
-
-        return;
-
-    }
-
-    const deltaX =
-        event.clientX -
-        state.pointerLastX;
-
-    const deltaY =
-        event.clientY -
-        state.pointerLastY;
-
-    const totalMovement =
-        Math.abs(
-            event.clientX -
-            state.pointerStartX
-        ) +
-        Math.abs(
-            event.clientY -
-            state.pointerStartY
-        );
-
-    if (totalMovement > 5) {
-
-        state.movedDuringPointer =
-            true;
-
-    }
-
-    state.panX +=
-        deltaX;
-
-    state.panY +=
-        deltaY;
-
-    state.pointerLastX =
-        event.clientX;
-
-    state.pointerLastY =
-        event.clientY;
-
-    updateCanvasTransform();
-
-}
-
-
-function handlePointerUp(event) {
-
-    if (!state.isDragging) {
-
-        return;
-
-    }
-
-    state.isDragging =
-        false;
-
-    canvasViewport.classList.remove(
-        "dragging"
-    );
-
-    try {
-
-        canvasViewport.releasePointerCapture(
-            event.pointerId
-        );
-
-    } catch (error) {
-
-        /*
-            Safe to ignore.
-        */
-
-    }
-
-
-    /*
-        A click without movement selects one pixel.
-
-        The actual coordinate calculation will be handled
-        by the production canvas engine/backend.
-    */
-
-    if (!state.movedDuringPointer) {
-
-        setSelectedPixels(
-            state.selectedPixels + 1
-        );
-
-    }
-
-}
-
-
-/* =========================================================
-   CANVAS WHEEL ZOOM
-========================================================= */
-
-function handleWheel(event) {
-
-    event.preventDefault();
-
-    const zoomMultiplier =
-        event.deltaY < 0
-            ? 1.12
-            : 0.89;
-
-    state.zoom =
-        Math.max(
-            0.2,
-            Math.min(
-                20,
-                state.zoom *
-                zoomMultiplier
+    const path =
+        url.pathname
+            .replace(
+                /^\/api\/?/,
+                ""
             )
-        );
-
-    updateCanvasTransform();
-
-}
-
-
-/* =========================================================
-   OPEN CHECKOUT
-========================================================= */
-
-function openCheckout() {
-
-    const district =
-        getCurrentDistrict();
-
-    let quantity =
-        state.selectedPixels;
-
-
-    /*
-        If no pixels are selected,
-        default to one for the People's/Youth districts.
-    */
-
-    if (quantity === 0) {
-
-        quantity =
-            district.minimumPixels;
-
-        setSelectedPixels(quantity);
-
-    }
-
-
-    /*
-        Check district minimum.
-    */
-
-    if (
-        quantity <
-        district.minimumPixels
-    ) {
-
-        alert(
-            `${district.name} requires a minimum purchase of ` +
-            `${formatNumber(district.minimumPixels)} pixels ` +
-            `(${formatCurrency(district.minimumPrice)}).`
-        );
-
-        return;
-
-    }
-
-
-    /*
-        Adult district requires age confirmation.
-
-        The production version should implement proper
-        age verification/access controls rather than relying
-        on this simple browser prompt.
-    */
-
-    if (district.adultOnly) {
-
-        const confirmed =
-            window.confirm(
-                "The Adult District is restricted to adults. " +
-                "You must be legally permitted to access adult content " +
-                "in your jurisdiction. Continue?"
+            .replace(
+                /\/+$/,
+                ""
             );
 
-        if (!confirmed) {
 
-            return;
+    const method =
+        request.method.toUpperCase();
+
+
+    try {
+
+        /*
+         * Public configuration.
+         */
+
+        if (
+            method === "GET" &&
+            path === "config"
+        ) {
+
+            return json(
+                getPublicConfig()
+            );
 
         }
 
+
+        /*
+         * Canvas statistics.
+         */
+
+        if (
+            method === "GET" &&
+            path === "canvas/stats"
+        ) {
+
+            const stats =
+                await getCanvasStatistics(
+                    env.DB
+                );
+
+
+            return json(
+                stats
+            );
+
+        }
+
+
+        /*
+         * Pixel lookup.
+         *
+         * /api/pixel/123
+         */
+
+        const pixelMatch =
+            path.match(
+                /^pixel\/(\d+)$/
+            );
+
+
+        if (
+            method === "GET" &&
+            pixelMatch
+        ) {
+
+            const pixelId =
+                Number(
+                    pixelMatch[1]
+                );
+
+
+            const pixel =
+                await getPixelState(
+                    env.DB,
+                    pixelId
+                );
+
+
+            return json(
+                sanitizePixel(
+                    pixel
+                )
+            );
+
+        }
+
+
+        /*
+         * Coordinate ownership lookup.
+         *
+         * /api/ownership/main/100/200
+         */
+
+        const coordinateMatch =
+            path.match(
+                /^ownership\/([^/]+)\/(\d+)\/(\d+)$/
+            );
+
+
+        if (
+            method === "GET" &&
+            coordinateMatch
+        ) {
+
+            const districtId =
+                decodeURIComponent(
+                    coordinateMatch[1]
+                );
+
+
+            const x =
+                Number(
+                    coordinateMatch[2]
+                );
+
+
+            const y =
+                Number(
+                    coordinateMatch[3]
+                );
+
+
+            const ownership =
+                await findOwnershipAt(
+                    env.DB,
+                    districtId,
+                    x,
+                    y
+                );
+
+
+            return json(
+                ownership
+                    ? sanitizeOwnership(
+                        ownership
+                    )
+                    : null
+            );
+
+        }
+
+
+        /*
+         * Create order.
+         *
+         * POST /api/orders
+         *
+         * Body:
+         *
+         * {
+         *   "districtId": "main",
+         *   "quantity": 10
+         * }
+         */
+
+        if (
+            method === "POST" &&
+            path === "orders"
+        ) {
+
+            const user =
+                await requireUser(
+                    request,
+                    env
+                );
+
+
+            const body =
+                await readJson(
+                    request
+                );
+
+
+            const order =
+                await createOrder(
+                    env.DB,
+                    {
+
+                        userId:
+                            user.id,
+
+                        districtId:
+                            body.districtId,
+
+                        quantity:
+                            body.quantity
+
+                    }
+                );
+
+
+            /*
+             * Generate BTC quote using the server-side USD
+             * order total.
+             */
+
+            const quote =
+                await createBitcoinQuote(
+                    order.priceUsd,
+                    env
+                );
+
+
+            await attachBitcoinQuoteToOrder(
+                env.DB,
+                {
+
+                    orderId:
+                        order.id,
+
+                    quote
+
+                }
+            );
+
+
+            return json({
+
+                orderId:
+                    order.id,
+
+                quantity:
+                    order.quantity,
+
+                priceUsd:
+                    order.priceUsd,
+
+                pricePerPixelUsd:
+                    1,
+
+                paymentCurrency:
+                    "BTC",
+
+                bitcoinAmount:
+                    quote.btcAmount,
+
+                bitcoinAmountSatoshis:
+                    quote.btcAmountSatoshis,
+
+                paymentAddress:
+                    quote.paymentAddress,
+
+                btcUsdRate:
+                    quote.btcUsdRate,
+
+                quoteExpiresAt:
+                    quote.expiresAt
+
+            }, 201);
+
+        }
+
+
+        /*
+         * Get order.
+         *
+         * GET /api/orders/:id
+         */
+
+        const orderMatch =
+            path.match(
+                /^orders\/([^/]+)$/
+            );
+
+
+        if (
+            method === "GET" &&
+            orderMatch
+        ) {
+
+            const user =
+                await requireUser(
+                    request,
+                    env
+                );
+
+
+            const orderId =
+                decodeURIComponent(
+                    orderMatch[1]
+                );
+
+
+            const result =
+                await getOrderStatus(
+                    env.DB,
+                    orderId
+                );
+
+
+            if (!result) {
+
+                return json(
+                    {
+                        error:
+                            "Order not found."
+                    },
+                    404
+                );
+
+            }
+
+
+            if (
+                result.order.user_id !==
+                user.id
+            ) {
+
+                return json(
+                    {
+                        error:
+                            "Access denied."
+                    },
+                    403
+                );
+
+            }
+
+
+            return json(
+                sanitizeOrder(
+                    result
+                )
+            );
+
+        }
+
+
+        /*
+         * Cancel order.
+         *
+         * POST /api/orders/:id/cancel
+         */
+
+        const cancelMatch =
+            path.match(
+                /^orders\/([^/]+)\/cancel$/
+            );
+
+
+        if (
+            method === "POST" &&
+            cancelMatch
+        ) {
+
+            const user =
+                await requireUser(
+                    request,
+                    env
+                );
+
+
+            const orderId =
+                decodeURIComponent(
+                    cancelMatch[1]
+                );
+
+
+            const existing =
+                await getOrderStatus(
+                    env.DB,
+                    orderId
+                );
+
+
+            if (!existing) {
+
+                return json(
+                    {
+                        error:
+                            "Order not found."
+                    },
+                    404
+                );
+
+            }
+
+
+            if (
+                existing.order.user_id !==
+                user.id
+            ) {
+
+                return json(
+                    {
+                        error:
+                            "Access denied."
+                    },
+                    403
+                );
+
+            }
+
+
+            const result =
+                await cancelOrder(
+                    env.DB,
+                    orderId
+                );
+
+
+            return json(
+                result
+            );
+
+        }
+
+
+        /*
+         * Get Bitcoin payment status.
+         *
+         * GET /api/orders/:id/payment
+         */
+
+        const paymentMatch =
+            path.match(
+                /^orders\/([^/]+)\/payment$/
+            );
+
+
+        if (
+            method === "GET" &&
+            paymentMatch
+        ) {
+
+            const user =
+                await requireUser(
+                    request,
+                    env
+                );
+
+
+            const orderId =
+                decodeURIComponent(
+                    paymentMatch[1]
+                );
+
+
+            const order =
+                await getOrderStatus(
+                    env.DB,
+                    orderId
+                );
+
+
+            if (!order) {
+
+                return json(
+                    {
+                        error:
+                            "Order not found."
+                    },
+                    404
+                );
+
+            }
+
+
+            if (
+                order.order.user_id !==
+                user.id
+            ) {
+
+                return json(
+                    {
+                        error:
+                            "Access denied."
+                    },
+                    403
+                );
+
+            }
+
+
+            const payment =
+                await getBitcoinPaymentStatus(
+                    env.DB,
+                    orderId
+                );
+
+
+            return json(
+                payment
+            );
+
+        }
+
+
+        /*
+         * Verify Bitcoin payment.
+         *
+         * The transaction ID is optional.
+         *
+         * The server independently verifies the blockchain
+         * transaction and receiving address.
+         */
+
+        const verifyPaymentMatch =
+            path.match(
+                /^orders\/([^/]+)\/verify-payment$/
+            );
+
+
+        if (
+            method === "POST" &&
+            verifyPaymentMatch
+        ) {
+
+            const user =
+                await requireUser(
+                    request,
+                    env
+                );
+
+
+            const orderId =
+                decodeURIComponent(
+                    verifyPaymentMatch[1]
+                );
+
+
+            const order =
+                await getOrderStatus(
+                    env.DB,
+                    orderId
+                );
+
+
+            if (!order) {
+
+                return json(
+                    {
+                        error:
+                            "Order not found."
+                    },
+                    404
+                );
+
+            }
+
+
+            if (
+                order.order.user_id !==
+                user.id
+            ) {
+
+                return json(
+                    {
+                        error:
+                            "Access denied."
+                    },
+                    403
+                );
+
+            }
+
+
+            const body =
+                await readJson(
+                    request,
+                    true
+                );
+
+
+            const payment =
+                await verifyBitcoinPayment(
+                    env.DB,
+                    env,
+                    {
+
+                        orderId,
+
+                        transactionId:
+                            body?.transactionId ||
+                            null
+
+                    }
+                );
+
+
+            /*
+             * When payment is fully confirmed, permanently
+             * finalize ownership.
+             */
+
+            if (
+                payment.status ===
+                "CONFIRMED"
+            ) {
+
+                const {
+                    completePaidOrder
+                } = await import(
+                    "./orders.js"
+                );
+
+
+                await completePaidOrder(
+                    env.DB,
+                    orderId
+                );
+
+            }
+
+
+            return json(
+                payment
+            );
+
+        }
+
+
+        /*
+         * Create content.
+         *
+         * POST /api/content
+         */
+
+        if (
+            method === "POST" &&
+            path === "content"
+        ) {
+
+            const user =
+                await requireUser(
+                    request,
+                    env
+                );
+
+
+            const body =
+                await readJson(
+                    request
+                );
+
+
+            const result =
+                await createContent(
+                    env.DB,
+                    {
+
+                        ownershipId:
+                            body.ownershipId,
+
+                        userId:
+                            user.id,
+
+                        content:
+                            body.content
+
+                    }
+                );
+
+
+            return json(
+                sanitizeContent(
+                    result
+                ),
+                201
+            );
+
+        }
+
+
+        /*
+         * Get content.
+         *
+         * GET /api/content/:id
+         */
+
+        const contentMatch =
+            path.match(
+                /^content\/([^/]+)$/
+            );
+
+
+        if (
+            method === "GET" &&
+            contentMatch
+        ) {
+
+            const contentId =
+                decodeURIComponent(
+                    contentMatch[1]
+                );
+
+
+            const content =
+                await getContent(
+                    env.DB,
+                    contentId
+                );
+
+
+            if (!content) {
+
+                return json(
+                    {
+                        error:
+                            "Content not found."
+                    },
+                    404
+                );
+
+            }
+
+
+            return json(
+                sanitizeContent(
+                    content
+                )
+            );
+
+        }
+
+
+        /*
+         * Publish content.
+         */
+
+        const publishMatch =
+            path.match(
+                /^content\/([^/]+)\/publish$/
+            );
+
+
+        if (
+            method === "POST" &&
+            publishMatch
+        ) {
+
+            const user =
+                await requireUser(
+                    request,
+                    env
+                );
+
+
+            const contentId =
+                decodeURIComponent(
+                    publishMatch[1]
+                );
+
+
+            const result =
+                await publishContent(
+                    env.DB,
+                    {
+
+                        contentId,
+
+                        userId:
+                            user.id
+
+                    }
+                );
+
+
+            return json(
+                sanitizeContent(
+                    result
+                )
+            );
+
+        }
+
+
+        /*
+         * Hide content.
+         */
+
+        const hideMatch =
+            path.match(
+                /^content\/([^/]+)\/hide$/
+            );
+
+
+        if (
+            method === "POST" &&
+            hideMatch
+        ) {
+
+            const user =
+                await requireUser(
+                    request,
+                    env
+                );
+
+
+            const contentId =
+                decodeURIComponent(
+                    hideMatch[1]
+                );
+
+
+            const result =
+                await hideContent(
+                    env.DB,
+                    {
+
+                        contentId,
+
+                        userId:
+                            user.id
+
+                    }
+                );
+
+
+            return json(
+                sanitizeContent(
+                    result
+                )
+            );
+
+        }
+
+
+        /*
+         * List content belonging to an ownership record.
+         */
+
+        const ownershipContentMatch =
+            path.match(
+                /^ownership\/([^/]+)\/content$/
+            );
+
+
+        if (
+            method === "GET" &&
+            ownershipContentMatch
+        ) {
+
+            const ownershipId =
+                decodeURIComponent(
+                    ownershipContentMatch[1]
+                );
+
+
+            const result =
+                await listOwnershipContent(
+                    env.DB,
+                    ownershipId
+                );
+
+
+            return json(
+                result.results.map(
+                    sanitizeContent
+                )
+            );
+
+        }
+
+
+        /*
+         * Report content.
+         */
+
+        const reportMatch =
+            path.match(
+                /^content\/([^/]+)\/report$/
+            );
+
+
+        if (
+            method === "POST" &&
+            reportMatch
+        ) {
+
+            const user =
+                await optionalUser(
+                    request,
+                    env
+                );
+
+
+            const body =
+                await readJson(
+                    request
+                );
+
+
+            const result =
+                await reportContent(
+                    env.DB,
+                    {
+
+                        contentId:
+                            decodeURIComponent(
+                                reportMatch[1]
+                            ),
+
+                        reporterUserId:
+                            user?.id ||
+                            null,
+
+                        reason:
+                            body.reason,
+
+                        details:
+                            body.details
+
+                    }
+                );
+
+
+            return json(
+                result,
+                201
+            );
+
+        }
+
+
+        return json(
+            {
+                error:
+                    "API endpoint not found."
+            },
+            404
+        );
+
+
+    } catch (
+        error
+    ) {
+
+        console.error(
+            "API error:",
+            error
+        );
+
+
+        const status =
+            Number(
+                error.status
+            ) ||
+            400;
+
+
+        return json(
+            {
+                error:
+                    error.message ||
+                    "Request failed."
+            },
+            status
+        );
+
     }
-
-
-    pixelQuantityInput.value =
-        quantity;
-
-    checkoutDistrict.value =
-        state.selectedDistrict;
-
-    updateCheckoutSummary();
-
-    checkoutOverlay.classList.remove(
-        "hidden"
-    );
-
-    checkoutOverlay.setAttribute(
-        "aria-hidden",
-        "false"
-    );
-
-    document.body.style.overflow =
-        "hidden";
-
-    setTimeout(
-        () => {
-
-            pixelQuantityInput.focus();
-
-            pixelQuantityInput.select();
-
-        },
-        50
-    );
 
 }
 
 
 /* =========================================================
-   CLOSE CHECKOUT
+   AUTH HELPERS
 ========================================================= */
 
-function closeCheckout() {
+async function requireUser(
+    request,
+    env
+) {
 
-    checkoutOverlay.classList.add(
-        "hidden"
+    const {
+        getAuthenticatedUser
+    } = await import(
+        "./auth.js"
     );
 
-    checkoutOverlay.setAttribute(
-        "aria-hidden",
-        "true"
-    );
 
-    document.body.style.overflow =
+    const user =
+        await getAuthenticatedUser(
+            request,
+            env
+        );
+
+
+    if (!user) {
+
+        const error =
+            new Error(
+                "Authentication required."
+            );
+
+
+        error.status =
+            401;
+
+
+        throw error;
+
+    }
+
+
+    return user;
+
+}
+
+
+async function optionalUser(
+    request,
+    env
+) {
+
+    try {
+
+        const {
+            getAuthenticatedUser
+        } = await import(
+            "./auth.js"
+        );
+
+
+        return await getAuthenticatedUser(
+            request,
+            env
+        );
+
+    } catch {
+
+        return null;
+
+    }
+
+}
+
+
+/* =========================================================
+   JSON BODY
+========================================================= */
+
+async function readJson(
+    request,
+    optional = false
+) {
+
+    const contentType =
+        request.headers.get(
+            "content-type"
+        ) ||
         "";
 
-}
 
-
-/* =========================================================
-   CHECKOUT SUMMARY
-========================================================= */
-
-function updateCheckoutSummary() {
-
-    let quantity =
-        Math.floor(
-            Number(
-                pixelQuantityInput.value
+    if (
+        !contentType
+            .toLowerCase()
+            .includes(
+                "application/json"
             )
-        );
-
-    if (
-        !Number.isFinite(quantity) ||
-        quantity < 1
-    ) {
-
-        quantity =
-            1;
-
-    }
-
-    const districtKey =
-        checkoutDistrict.value;
-
-    const district =
-        DISTRICTS[districtKey];
-
-    if (!district) {
-
-        return;
-
-    }
-
-    checkoutPixels.textContent =
-        formatNumber(quantity);
-
-    checkoutPrice.textContent =
-        formatCurrency(quantity);
-
-}
-
-
-/* =========================================================
-   CHECKOUT DISTRICT CHANGE
-========================================================= */
-
-function handleCheckoutDistrictChange() {
-
-    const districtKey =
-        checkoutDistrict.value;
-
-    const district =
-        DISTRICTS[districtKey];
-
-    if (!district) {
-
-        return;
-
-    }
-
-    let quantity =
-        Math.floor(
-            Number(
-                pixelQuantityInput.value
-            )
-        );
-
-    if (
-        !Number.isFinite(quantity) ||
-        quantity < 1
-    ) {
-
-        quantity =
-            1;
-
-    }
-
-    if (
-        quantity <
-        district.minimumPixels
-    ) {
-
-        quantity =
-            district.minimumPixels;
-
-    }
-
-    pixelQuantityInput.value =
-        quantity;
-
-    updateCheckoutSummary();
-
-}
-
-
-/* =========================================================
-   QUANTITY VALIDATION
-========================================================= */
-
-function validateCheckoutQuantity() {
-
-    const district =
-        DISTRICTS[
-            checkoutDistrict.value
-        ];
-
-    if (!district) {
-
-        return false;
-
-    }
-
-    let quantity =
-        Math.floor(
-            Number(
-                pixelQuantityInput.value
-            )
-        );
-
-    if (
-        !Number.isFinite(quantity) ||
-        quantity < 1
-    ) {
-
-        quantity =
-            1;
-
-    }
-
-    pixelQuantityInput.value =
-        quantity;
-
-    if (
-        quantity <
-        district.minimumPixels
-    ) {
-
-        alert(
-            `${district.name} requires at least ` +
-            `${formatNumber(district.minimumPixels)} pixels.`
-        );
-
-        pixelQuantityInput.value =
-            district.minimumPixels;
-
-        updateCheckoutSummary();
-
-        return false;
-
-    }
-
-    if (
-        quantity >
-        TOTAL_PIXELS -
-        state.soldPixels
-    ) {
-
-        alert(
-            "There are not enough pixels available."
-        );
-
-        return false;
-
-    }
-
-    return true;
-
-}
-
-
-/* =========================================================
-   PRODUCTION CHECKOUT HANDOFF
-========================================================= */
-
-async function continueToProductionCheckout() {
-
-    /*
-        THIS IS INTENTIONALLY NOT A REAL PAYMENT CALL.
-
-        The production implementation must send the order
-        to a trusted backend.
-
-        Never:
-        - trust the client price
-        - trust a client-selected coordinate
-        - accept a transaction screenshot
-        - mark pixels sold from browser JavaScript
-        - expose private Bitcoin keys
-    */
-
-
-    if (!validateCheckoutQuantity()) {
-
-        return;
-
-    }
-
-    const quantity =
-        Math.floor(
-            Number(
-                pixelQuantityInput.value
-            )
-        );
-
-    const district =
-        checkoutDistrict.value;
-
-
-    /*
-        Production API contract we will implement later:
-
-        POST /api/orders
-
-        {
-            quantity,
-            district
-        }
-
-        The server will:
-        1. Validate availability
-        2. Calculate the USD price
-        3. Reserve exact coordinates
-        4. Calculate BTC amount
-        5. Create payment order
-        6. Return payment instructions
-    */
-
-
-    const payload = {
-
-        quantity,
-
-        district,
-
-        currency:
-            "USD",
-
-        unitPrice:
-            1,
-
-        totalUsd:
-            quantity,
-
-        paymentCurrency:
-            "BTC",
-
-        receivingAddress:
-            BTC_RECEIVING_ADDRESS
-
-    };
-
-
-    /*
-        Until the production backend exists,
-        show a clear status instead of pretending
-        that payment was completed.
-    */
-
-    console.info(
-        "Production checkout payload:",
-        payload
-    );
-
-    alert(
-        "The production Bitcoin checkout is the next backend step. " +
-        "No payment has been made and no pixels have been sold."
-    );
-
-}
-
-
-/* =========================================================
-   HEADER / CTA ACTIONS
-========================================================= */
-
-function scrollToCanvas() {
-
-    const canvasSection =
-        document.getElementById(
-            "canvas"
-        );
-
-    if (!canvasSection) {
-
-        return;
-
-    }
-
-    canvasSection.scrollIntoView({
-        behavior: "smooth",
-        block: "start"
-    });
-
-}
-
-
-function startSinglePixelPurchase() {
-
-    state.selectedDistrict =
-        "people";
-
-    districtSelect.value =
-        "people";
-
-    setSelectedPixels(1);
-
-    scrollToCanvas();
-
-    setTimeout(
-        openCheckout,
-        500
-    );
-
-}
-
-
-/* =========================================================
-   KEYBOARD SHORTCUTS
-========================================================= */
-
-function handleKeyboard(event) {
-
-    /*
-        Escape closes checkout.
-    */
-
-    if (
-        event.key ===
-        "Escape"
     ) {
 
         if (
-            !checkoutOverlay.classList.contains(
-                "hidden"
-            )
+            optional
         ) {
 
-            closeCheckout();
+            return {};
 
         }
 
-        return;
+
+        const error =
+            new Error(
+                "Request must use application/json."
+            );
+
+
+        error.status =
+            415;
+
+
+        throw error;
 
     }
 
 
-    /*
-        + / = zoom in
-        - zoom out
-        0 reset
-    */
+    try {
 
-    if (
-        event.target.tagName ===
-        "INPUT"
-    ) {
+        return await request.json();
 
-        return;
+    } catch {
 
-    }
+        const error =
+            new Error(
+                "Invalid JSON request body."
+            );
 
-    if (
-        event.key === "+" ||
-        event.key === "="
-    ) {
 
-        zoomIn();
+        error.status =
+            400;
 
-    }
 
-    if (
-        event.key === "-"
-    ) {
-
-        zoomOut();
-
-    }
-
-    if (
-        event.key === "0"
-    ) {
-
-        resetZoom();
+        throw error;
 
     }
 
@@ -1090,272 +1157,274 @@ function handleKeyboard(event) {
 
 
 /* =========================================================
-   EVENT LISTENERS
+   PIXEL SANITIZATION
 ========================================================= */
 
-if (districtSelect) {
+function sanitizePixel(
+    pixel
+) {
 
-    districtSelect.addEventListener(
-        "change",
-        event => {
+    if (!pixel) {
 
-            changeDistrict(
-                event.target.value
-            );
+        return null;
 
-        }
-    );
-
-}
+    }
 
 
-if (clearSelectionButton) {
+    return {
 
-    clearSelectionButton.addEventListener(
-        "click",
-        clearSelection
-    );
+        pixelId:
+            pixel.pixelId,
 
-}
+        x:
+            pixel.x,
 
+        y:
+            pixel.y,
 
-if (buySelectedButton) {
+        districtId:
+            pixel.districtId,
 
-    buySelectedButton.addEventListener(
-        "click",
-        openCheckout
-    );
+        status:
+            pixel.status,
 
-}
+        /*
+         * Do not expose another user's internal IDs through
+         * a public pixel lookup.
+         */
 
+        owned:
+            pixel.status === "SOLD"
 
-if (headerBuyButton) {
-
-    headerBuyButton.addEventListener(
-        "click",
-        startSinglePixelPurchase
-    );
+    };
 
 }
 
 
-if (finalBuyButton) {
+/* =========================================================
+   OWNERSHIP SANITIZATION
+========================================================= */
 
-    finalBuyButton.addEventListener(
-        "click",
-        startSinglePixelPurchase
-    );
+function sanitizeOwnership(
+    ownership
+) {
 
-}
+    if (!ownership) {
 
+        return null;
 
-if (exploreButton) {
-
-    exploreButton.addEventListener(
-        "click",
-        scrollToCanvas
-    );
-
-}
+    }
 
 
-if (zoomInButton) {
+    return {
 
-    zoomInButton.addEventListener(
-        "click",
-        zoomIn
-    );
+        id:
+            ownership.id,
 
-}
+        pixelId:
+            ownership.pixel_id,
 
+        districtId:
+            ownership.district_id,
 
-if (zoomOutButton) {
+        x:
+            ownership.x,
 
-    zoomOutButton.addEventListener(
-        "click",
-        zoomOut
-    );
+        y:
+            ownership.y,
 
-}
+        status:
+            ownership.status,
 
+        createdAt:
+            ownership.created_at
 
-if (zoomResetButton) {
-
-    zoomResetButton.addEventListener(
-        "click",
-        resetZoom
-    );
+    };
 
 }
 
 
-if (canvasViewport) {
+/* =========================================================
+   ORDER SANITIZATION
+========================================================= */
 
-    canvasViewport.addEventListener(
-        "pointerdown",
-        handlePointerDown
-    );
+function sanitizeOrder(
+    result
+) {
 
-    canvasViewport.addEventListener(
-        "pointermove",
-        handlePointerMove
-    );
+    return {
 
-    canvasViewport.addEventListener(
-        "pointerup",
-        handlePointerUp
-    );
+        order: {
 
-    canvasViewport.addEventListener(
-        "pointercancel",
-        handlePointerUp
-    );
+            id:
+                result.order.id,
 
-    canvasViewport.addEventListener(
-        "wheel",
-        handleWheel,
+            quantity:
+                result.order.quantity,
+
+            priceUsd:
+                result.order.price_usd,
+
+            paymentCurrency:
+                result.order.payment_currency,
+
+            status:
+                result.order.status,
+
+            createdAt:
+                result.order.created_at,
+
+            completedAt:
+                result.order.completed_at
+
+        },
+
+        allocation:
+            result.allocation.map(
+                pixel => ({
+
+                    pixelId:
+                        pixel.pixel_id,
+
+                    districtId:
+                        pixel.district_id,
+
+                    x:
+                        pixel.x,
+
+                    y:
+                        pixel.y,
+
+                    status:
+                        pixel.status
+
+                })
+            ),
+
+        payment:
+            result.payment
+                ? {
+
+                    status:
+                        result.payment.status,
+
+                    paymentAddress:
+                        result.payment.payment_address,
+
+                    expectedSatoshis:
+                        result.payment.expected_satoshis,
+
+                    receivedSatoshis:
+                        result.payment.received_satoshis,
+
+                    transactionId:
+                        result.payment.transaction_id,
+
+                    confirmations:
+                        result.payment.confirmation_count
+
+                }
+                : null
+
+    };
+
+}
+
+
+/* =========================================================
+   CONTENT SANITIZATION
+========================================================= */
+
+function sanitizeContent(
+    content
+) {
+
+    if (!content) {
+
+        return null;
+
+    }
+
+
+    return {
+
+        id:
+            content.id,
+
+        ownershipId:
+            content.ownershipId,
+
+        contentType:
+            content.contentType,
+
+        title:
+            content.title,
+
+        description:
+            content.description,
+
+        imageUrl:
+            content.imageUrl,
+
+        externalUrl:
+            content.externalUrl,
+
+        altText:
+            content.altText,
+
+        isAdultContent:
+            Boolean(
+                content.isAdultContent
+            ),
+
+        status:
+            content.status,
+
+        district:
+            content.district,
+
+        createdAt:
+            content.createdAt,
+
+        publishedAt:
+            content.publishedAt
+
+    };
+
+}
+
+
+/* =========================================================
+   RESPONSE
+========================================================= */
+
+function json(
+    data,
+    status = 200
+) {
+
+    return new Response(
+
+        JSON.stringify(
+            data
+        ),
+
         {
-            passive: false
-        }
-    );
 
-}
+            status,
 
+            headers: {
 
-if (closeCheckoutButton) {
+                "Content-Type":
+                    "application/json; charset=utf-8",
 
-    closeCheckoutButton.addEventListener(
-        "click",
-        closeCheckout
-    );
-
-}
-
-
-if (checkoutOverlay) {
-
-    checkoutOverlay.addEventListener(
-        "click",
-        event => {
-
-            if (
-                event.target ===
-                checkoutOverlay
-            ) {
-
-                closeCheckout();
+                "Cache-Control":
+                    "no-store"
 
             }
 
         }
+
     );
 
 }
-
-
-if (pixelQuantityInput) {
-
-    pixelQuantityInput.addEventListener(
-        "input",
-        updateCheckoutSummary
-    );
-
-}
-
-
-if (checkoutDistrict) {
-
-    checkoutDistrict.addEventListener(
-        "change",
-        handleCheckoutDistrictChange
-    );
-
-}
-
-
-if (continueCheckoutButton) {
-
-    continueCheckoutButton.addEventListener(
-        "click",
-        continueToProductionCheckout
-    );
-
-}
-
-
-document.addEventListener(
-    "keydown",
-    handleKeyboard
-);
-
-
-/* =========================================================
-   INITIALIZATION
-========================================================= */
-
-function initializeApplication() {
-
-    state.selectedDistrict =
-        districtSelect
-            ? districtSelect.value
-            : "people";
-
-    state.soldPixels =
-        0;
-
-    state.selectedPixels =
-        0;
-
-    state.zoom =
-        1;
-
-    state.panX =
-        0;
-
-    state.panY =
-        0;
-
-    updateStatistics();
-
-    updateSelectionDisplay();
-
-    updateCanvasTransform();
-
-}
-
-
-/* =========================================================
-   START
-========================================================= */
-
-initializeApplication();
-
-
-/* =========================================================
-   DEVELOPMENT DIAGNOSTICS
-========================================================= */
-
-window.BillionPixelCanvas =
-    {
-
-        version:
-            "0.1.0",
-
-        totalPixels:
-            TOTAL_PIXELS,
-
-        btcAddress:
-            BTC_RECEIVING_ADDRESS,
-
-        districts:
-            DISTRICTS,
-
-        getState() {
-
-            return {
-                ...state
-            };
-
-        }
-
-    };
