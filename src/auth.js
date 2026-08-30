@@ -1,30 +1,18 @@
 /**
  * =========================================================
  * BILLION PIXEL CANVAS
- * Authentication & Sessions
+ * AUTHENTICATION + SESSION ENGINE
  * =========================================================
  *
- * PURPOSE
+ * Uses:
  *
- * - Create user accounts
- * - Authenticate users
- * - Create secure sessions
- * - Authenticate API requests
- * - Verify ownership access
- * - Handle age-verification state
+ * - Email + password
+ * - Secure password hashing
+ * - HttpOnly session cookie
+ * - Server-side sessions stored in D1
  *
- * SECURITY
- *
- * Passwords are NEVER stored directly.
- *
- * Passwords are hashed with Web Crypto PBKDF2.
- *
- * Sessions use cryptographically random tokens.
- *
- * The raw session token is NOT stored in the database.
- * Only its SHA-256 hash is stored.
- *
- * =========================================================
+ * NEVER store plaintext passwords.
+ * NEVER store private Bitcoin keys.
  */
 
 "use strict";
@@ -34,93 +22,921 @@
    CONSTANTS
 ========================================================= */
 
-const SESSION_DAYS = 30;
-
 const SESSION_COOKIE =
     "bpc_session";
 
 
+const SESSION_DAYS =
+    30;
+
+
+const SESSION_SECONDS =
+    SESSION_DAYS *
+    24 *
+    60 *
+    60;
+
+
+const MIN_PASSWORD_LENGTH =
+    12;
+
+
+const MAX_EMAIL_LENGTH =
+    320;
+
+
+/* =========================================================
+   PASSWORD HASHING
+========================================================= */
+
 const PBKDF2_ITERATIONS =
-    310000;
+    210_000;
 
 
 const PBKDF2_HASH =
     "SHA-256";
 
 
-const PASSWORD_MIN_LENGTH =
-    12;
-
-
-const PASSWORD_MAX_LENGTH =
-    128;
+const PBKDF2_KEY_LENGTH =
+    256;
 
 
 /* =========================================================
-   ENCODING
+   REGISTER USER
 ========================================================= */
 
-function bytesToHex(
-    bytes
+export async function registerUser(
+    db,
+    {
+        email,
+        password
+    }
 ) {
 
-    return Array.from(
-        new Uint8Array(
-            bytes
+    const normalizedEmail =
+        normalizeEmail(
+            email
+        );
+
+
+    validatePassword(
+        password
+    );
+
+
+    /*
+     * Check whether account already exists.
+     */
+
+    const existing =
+        await db.prepare(
+            `
+            SELECT
+                id
+            FROM users
+            WHERE email = ?
+            LIMIT 1
+            `
         )
+        .bind(
+            normalizedEmail
+        )
+        .first();
+
+
+    if (existing) {
+
+        const error =
+            new Error(
+                "An account with this email already exists."
+            );
+
+
+        error.status =
+            409;
+
+
+        throw error;
+
+    }
+
+
+    /*
+     * Generate a random salt.
+     */
+
+    const salt =
+        randomBytes(
+            16
+        );
+
+
+    const passwordHash =
+        await hashPassword(
+            password,
+            salt
+        );
+
+
+    const userId =
+        `user_${crypto.randomUUID()}`;
+
+
+    await db.prepare(
+        `
+        INSERT INTO users (
+
+            id,
+
+            email,
+
+            password_hash,
+
+            password_salt,
+
+            email_verified,
+
+            age_verified,
+
+            created_at,
+
+            updated_at
+
+        )
+
+        VALUES (
+
+            ?,
+
+            ?,
+
+            ?,
+
+            ?,
+
+            0,
+
+            0,
+
+            CURRENT_TIMESTAMP,
+
+            CURRENT_TIMESTAMP
+
+        )
+        `
     )
-        .map(
-            byte =>
-                byte
-                    .toString(16)
-                    .padStart(2, "0")
+    .bind(
+
+        userId,
+
+        normalizedEmail,
+
+        passwordHash,
+
+        bytesToBase64(
+            salt
         )
-        .join("");
+
+    )
+    .run();
+
+
+    return {
+
+        id:
+            userId,
+
+        email:
+            normalizedEmail,
+
+        emailVerified:
+            false,
+
+        ageVerified:
+            false
+
+    };
 
 }
 
 
-function hexToBytes(
-    hex
+/* =========================================================
+   LOGIN
+========================================================= */
+
+export async function loginUser(
+    db,
+    {
+        email,
+        password
+    }
 ) {
 
-    if (
-        typeof hex !== "string" ||
-        hex.length % 2 !== 0
-    ) {
+    const normalizedEmail =
+        normalizeEmail(
+            email
+        );
+
+
+    const user =
+        await db.prepare(
+            `
+            SELECT
+                *
+            FROM users
+            WHERE email = ?
+            LIMIT 1
+            `
+        )
+        .bind(
+            normalizedEmail
+        )
+        .first();
+
+
+    /*
+     * Use the same generic error for unknown users and
+     * incorrect passwords.
+     */
+
+    if (!user) {
 
         throw new Error(
-            "Invalid hexadecimal data."
+            "Invalid email or password."
         );
 
     }
 
 
-    const bytes =
-        new Uint8Array(
-            hex.length / 2
+    const salt =
+        base64ToBytes(
+            user.password_salt
         );
+
+
+    const suppliedHash =
+        await hashPassword(
+            password,
+            salt
+        );
+
+
+    const valid =
+        constantTimeEqual(
+            suppliedHash,
+            user.password_hash
+        );
+
+
+    if (!valid) {
+
+        throw new Error(
+            "Invalid email or password."
+        );
+
+    }
+
+
+    /*
+     * Create a new session.
+     */
+
+    const session =
+        await createSession(
+            db,
+            user.id
+        );
+
+
+    return {
+
+        user: sanitizeUser(
+            user
+        ),
+
+        sessionToken:
+            session.token,
+
+        expiresAt:
+            session.expiresAt
+
+    };
+
+}
+
+
+/* =========================================================
+   CREATE SESSION
+========================================================= */
+
+async function createSession(
+    db,
+    userId
+) {
+
+    const rawToken =
+        bytesToBase64Url(
+            randomBytes(
+                32
+            )
+        );
+
+
+    /*
+     * Store only a hash of the session token.
+     */
+
+    const tokenHash =
+        await sha256(
+            rawToken
+        );
+
+
+    const sessionId =
+        `session_${crypto.randomUUID()}`;
+
+
+    const expiresAt =
+        new Date(
+            Date.now() +
+            SESSION_SECONDS *
+            1000
+        )
+            .toISOString();
+
+
+    await db.prepare(
+        `
+        INSERT INTO sessions (
+
+            id,
+
+            user_id,
+
+            token_hash,
+
+            expires_at,
+
+            created_at,
+
+            last_used_at
+
+        )
+
+        VALUES (
+
+            ?,
+
+            ?,
+
+            ?,
+
+            ?,
+
+            CURRENT_TIMESTAMP,
+
+            CURRENT_TIMESTAMP
+
+        )
+        `
+    )
+    .bind(
+
+        sessionId,
+
+        userId,
+
+        tokenHash,
+
+        expiresAt
+
+    )
+    .run();
+
+
+    return {
+
+        id:
+            sessionId,
+
+        token:
+            rawToken,
+
+        expiresAt
+
+    };
+
+}
+
+
+/* =========================================================
+   AUTHENTICATED USER
+========================================================= */
+
+export async function getAuthenticatedUser(
+    request,
+    env
+) {
+
+    const token =
+        getSessionCookie(
+            request
+        );
+
+
+    if (!token) {
+
+        return null;
+
+    }
+
+
+    const tokenHash =
+        await sha256(
+            token
+        );
+
+
+    const session =
+        await env.DB.prepare(
+            `
+            SELECT
+
+                s.id AS session_id,
+
+                s.user_id,
+
+                s.expires_at,
+
+                u.id,
+
+                u.email,
+
+                u.email_verified,
+
+                u.age_verified,
+
+                u.created_at
+
+            FROM sessions s
+
+            JOIN users u
+                ON u.id = s.user_id
+
+            WHERE s.token_hash = ?
+
+              AND s.expires_at >
+                  CURRENT_TIMESTAMP
+
+            LIMIT 1
+            `
+        )
+        .bind(
+            tokenHash
+        )
+        .first();
+
+
+    if (!session) {
+
+        return null;
+
+    }
+
+
+    /*
+     * Refresh last-used timestamp.
+     */
+
+    await env.DB.prepare(
+        `
+        UPDATE sessions
+
+        SET
+
+            last_used_at =
+                CURRENT_TIMESTAMP
+
+        WHERE id = ?
+        `
+    )
+    .bind(
+        session.session_id
+    )
+    .run();
+
+
+    return {
+
+        id:
+            session.user_id,
+
+        email:
+            session.email,
+
+        emailVerified:
+            Number(
+                session.email_verified
+            ) === 1,
+
+        ageVerified:
+            Number(
+                session.age_verified
+            ) === 1,
+
+        createdAt:
+            session.created_at
+
+    };
+
+}
+
+
+/* =========================================================
+   LOGOUT
+========================================================= */
+
+export async function logoutUser(
+    request,
+    env
+) {
+
+    const token =
+        getSessionCookie(
+            request
+        );
+
+
+    if (token) {
+
+        const tokenHash =
+            await sha256(
+                token
+            );
+
+
+        await env.DB.prepare(
+            `
+            DELETE FROM sessions
+            WHERE token_hash = ?
+            `
+        )
+        .bind(
+            tokenHash
+        )
+        .run();
+
+    }
+
+
+    return {
+
+        success:
+            true,
+
+        headers:
+            logoutCookieHeaders()
+
+    };
+
+}
+
+
+/* =========================================================
+   SET SESSION COOKIE
+========================================================= */
+
+export function sessionCookieHeaders(
+    token
+) {
+
+    return {
+
+        "Set-Cookie":
+            `${SESSION_COOKIE}=${encodeURIComponent(
+                token
+            )}; Max-Age=${SESSION_SECONDS}; Path=/; HttpOnly; Secure; SameSite=Lax`
+
+    };
+
+}
+
+
+/* =========================================================
+   LOGOUT COOKIE
+========================================================= */
+
+export function logoutCookieHeaders() {
+
+    return {
+
+        "Set-Cookie":
+            `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`
+
+    };
+
+}
+
+
+/* =========================================================
+   GET COOKIE
+========================================================= */
+
+function getSessionCookie(
+    request
+) {
+
+    const header =
+        request.headers.get(
+            "Cookie"
+        );
+
+
+    if (!header) {
+
+        return null;
+
+    }
+
+
+    const cookies =
+        header
+            .split(";")
+            .map(
+                part =>
+                    part.trim()
+            );
 
 
     for (
-        let i = 0;
-        i < bytes.length;
-        i++
+        const cookie
+        of cookies
     ) {
 
-        bytes[i] =
-            parseInt(
-                hex.slice(
-                    i * 2,
-                    i * 2 + 2
-                ),
-                16
+        const separator =
+            cookie.indexOf("=");
+
+
+        if (
+            separator === -1
+        ) {
+
+            continue;
+
+        }
+
+
+        const name =
+            cookie.slice(
+                0,
+                separator
             );
+
+
+        if (
+            name !==
+            SESSION_COOKIE
+        ) {
+
+            continue;
+
+        }
+
+
+        const value =
+            cookie.slice(
+                separator + 1
+            );
+
+
+        try {
+
+            return decodeURIComponent(
+                value
+            );
+
+        } catch {
+
+            return null;
+
+        }
 
     }
 
 
-    return bytes;
+    return null;
+
+}
+
+
+/* =========================================================
+   NORMALIZE EMAIL
+========================================================= */
+
+function normalizeEmail(
+    email
+) {
+
+    if (
+        typeof email !==
+        "string"
+    ) {
+
+        throw new Error(
+            "Email is required."
+        );
+
+    }
+
+
+    const normalized =
+        email
+            .trim()
+            .toLowerCase();
+
+
+    if (
+        !normalized ||
+        normalized.length >
+            MAX_EMAIL_LENGTH
+    ) {
+
+        throw new Error(
+            "Invalid email address."
+        );
+
+    }
+
+
+    /*
+     * Deliberately conservative validation.
+     */
+
+    if (
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/
+            .test(
+                normalized
+            )
+    ) {
+
+        throw new Error(
+            "Invalid email address."
+        );
+
+    }
+
+
+    return normalized;
+
+}
+
+
+/* =========================================================
+   PASSWORD VALIDATION
+========================================================= */
+
+function validatePassword(
+    password
+) {
+
+    if (
+        typeof password !==
+        "string"
+    ) {
+
+        throw new Error(
+            "Password is required."
+        );
+
+    }
+
+
+    if (
+        password.length <
+        MIN_PASSWORD_LENGTH
+    ) {
+
+        throw new Error(
+            `Password must contain at least ${MIN_PASSWORD_LENGTH} characters.`
+        );
+
+    }
+
+
+    if (
+        password.length >
+        256
+    ) {
+
+        throw new Error(
+            "Password is too long."
+        );
+
+    }
+
+
+    return true;
+
+}
+
+
+/* =========================================================
+   HASH PASSWORD
+========================================================= */
+
+async function hashPassword(
+    password,
+    salt
+) {
+
+    const encoder =
+        new TextEncoder();
+
+
+    const keyMaterial =
+        await crypto.subtle.importKey(
+
+            "raw",
+
+            encoder.encode(
+                password
+            ),
+
+            "PBKDF2",
+
+            false,
+
+            [
+                "deriveBits"
+            ]
+
+        );
+
+
+    const bits =
+        await crypto.subtle.deriveBits(
+
+            {
+
+                name:
+                    "PBKDF2",
+
+                salt,
+
+                iterations:
+                    PBKDF2_ITERATIONS,
+
+                hash:
+                    PBKDF2_HASH
+
+            },
+
+            keyMaterial,
+
+            PBKDF2_KEY_LENGTH
+
+        );
+
+
+    return bytesToBase64(
+        new Uint8Array(
+            bits
+        )
+    );
+
+}
+
+
+/* =========================================================
+   SHA-256
+========================================================= */
+
+async function sha256(
+    value
+) {
+
+    const encoder =
+        new TextEncoder();
+
+
+    const data =
+        encoder.encode(
+            value
+        );
+
+
+    const digest =
+        await crypto.subtle.digest(
+            "SHA-256",
+            data
+        );
+
+
+    return bytesToBase64(
+        new Uint8Array(
+            digest
+        )
+    );
 
 }
 
@@ -150,226 +966,163 @@ function randomBytes(
 
 
 /* =========================================================
-   RANDOM TOKEN
+   BYTES → BASE64
 ========================================================= */
 
-function randomToken(
-    byteLength = 32
+function bytesToBase64(
+    bytes
 ) {
 
-    return bytesToHex(
-        randomBytes(
-            byteLength
-        )
+    let binary =
+        "";
+
+
+    for (
+        const byte
+        of bytes
+    ) {
+
+        binary +=
+            String.fromCharCode(
+                byte
+            );
+
+    }
+
+
+    return btoa(
+        binary
     );
 
 }
 
 
 /* =========================================================
-   SHA-256
+   BASE64 → BYTES
 ========================================================= */
 
-async function sha256(
+function base64ToBytes(
     value
 ) {
 
-    const encoded =
-        new TextEncoder().encode(
+    const binary =
+        atob(
             value
         );
 
 
-    const digest =
-        await crypto.subtle.digest(
-            "SHA-256",
-            encoded
+    const bytes =
+        new Uint8Array(
+            binary.length
         );
-
-
-    return bytesToHex(
-        digest
-    );
-
-}
-
-
-/* =========================================================
-   PASSWORD VALIDATION
-========================================================= */
-
-function validatePassword(
-    password
-) {
-
-    if (
-        typeof password !== "string"
-    ) {
-
-        throw new Error(
-            "Password is required."
-        );
-
-    }
-
-
-    if (
-        password.length <
-        PASSWORD_MIN_LENGTH
-    ) {
-
-        throw new Error(
-            `Password must contain at least ${PASSWORD_MIN_LENGTH} characters.`
-        );
-
-    }
-
-
-    if (
-        password.length >
-        PASSWORD_MAX_LENGTH
-    ) {
-
-        throw new Error(
-            "Password is too long."
-        );
-
-    }
-
-
-    return true;
-
-}
-
-
-/* =========================================================
-   PASSWORD HASH
-========================================================= */
-
-export async function hashPassword(
-    password
-) {
-
-    validatePassword(
-        password
-    );
-
-
-    const salt =
-        randomBytes(
-            16
-        );
-
-
-    const passwordBytes =
-        new TextEncoder().encode(
-            password
-        );
-
-
-    const key =
-        await crypto.subtle.importKey(
-            "raw",
-            passwordBytes,
-            {
-                name:
-                    "PBKDF2"
-            },
-            false,
-            [
-                "deriveBits"
-            ]
-        );
-
-
-    const derivedBits =
-        await crypto.subtle.deriveBits(
-            {
-                name:
-                    "PBKDF2",
-
-                salt,
-
-                iterations:
-                    PBKDF2_ITERATIONS,
-
-                hash:
-                    PBKDF2_HASH
-            },
-
-            key,
-
-            256
-        );
-
-
-    return {
-
-        algorithm:
-            "PBKDF2",
-
-        hash:
-            PBKDF2_HASH,
-
-        iterations:
-            PBKDF2_ITERATIONS,
-
-        salt:
-            bytesToHex(
-                salt
-            ),
-
-        derived:
-            bytesToHex(
-                derivedBits
-            )
-
-    };
-
-}
-
-
-/* =========================================================
-   CONSTANT-TIME COMPARISON
-========================================================= */
-
-function constantTimeEqual(
-    first,
-    second
-) {
-
-    if (
-        typeof first !== "string" ||
-        typeof second !== "string"
-    ) {
-
-        return false;
-
-    }
-
-
-    if (
-        first.length !==
-        second.length
-    ) {
-
-        return false;
-
-    }
-
-
-    let result = 0;
 
 
     for (
         let i = 0;
-        i < first.length;
+        i < binary.length;
         i++
     ) {
 
+        bytes[i] =
+            binary.charCodeAt(
+                i
+            );
+
+    }
+
+
+    return bytes;
+
+}
+
+
+/* =========================================================
+   BYTES → BASE64URL
+========================================================= */
+
+function bytesToBase64Url(
+    bytes
+) {
+
+    return bytesToBase64(
+        bytes
+    )
+        .replace(
+            /\+/g,
+            "-"
+        )
+        .replace(
+            /\//g,
+            "_"
+        )
+        .replace(
+            /=+$/,
+            ""
+        );
+
+}
+
+
+/* =========================================================
+   CONSTANT-TIME STRING COMPARISON
+========================================================= */
+
+function constantTimeEqual(
+    a,
+    b
+) {
+
+    if (
+        typeof a !== "string" ||
+        typeof b !== "string"
+    ) {
+
+        return false;
+
+    }
+
+
+    const aLength =
+        a.length;
+
+
+    const bLength =
+        b.length;
+
+
+    let result =
+        aLength ^
+        bLength;
+
+
+    const length =
+        Math.max(
+            aLength,
+            bLength
+        );
+
+
+    for (
+        let i = 0;
+        i < length;
+        i++
+    ) {
+
+        const aCode =
+            i < aLength
+                ? a.charCodeAt(i)
+                : 0;
+
+
+        const bCode =
+            i < bLength
+                ? b.charCodeAt(i)
+                : 0;
+
+
         result |=
-            first.charCodeAt(i) ^
-            second.charCodeAt(i);
+            aCode ^
+            bCode;
 
     }
 
@@ -380,979 +1133,33 @@ function constantTimeEqual(
 
 
 /* =========================================================
-   VERIFY PASSWORD
+   USER SANITIZATION
 ========================================================= */
 
-export async function verifyPassword(
-    password,
-    stored
+function sanitizeUser(
+    user
 ) {
-
-    if (
-        !stored
-    ) {
-
-        return false;
-
-    }
-
-
-    validatePassword(
-        password
-    );
-
-
-    const salt =
-        hexToBytes(
-            stored.salt
-        );
-
-
-    const passwordBytes =
-        new TextEncoder().encode(
-            password
-        );
-
-
-    const key =
-        await crypto.subtle.importKey(
-            "raw",
-            passwordBytes,
-            {
-                name:
-                    "PBKDF2"
-            },
-            false,
-            [
-                "deriveBits"
-            ]
-        );
-
-
-    const derivedBits =
-        await crypto.subtle.deriveBits(
-            {
-                name:
-                    "PBKDF2",
-
-                salt,
-
-                iterations:
-                    stored.iterations,
-
-                hash:
-                    stored.hash
-            },
-
-            key,
-
-            256
-        );
-
-
-    const derived =
-        bytesToHex(
-            derivedBits
-        );
-
-
-    return constantTimeEqual(
-        derived,
-        stored.derived
-    );
-
-}
-
-
-/* =========================================================
-   USERNAME VALIDATION
-========================================================= */
-
-function validateUsername(
-    username
-) {
-
-    if (
-        typeof username !== "string"
-    ) {
-
-        throw new Error(
-            "Username is required."
-        );
-
-    }
-
-
-    const value =
-        username
-            .trim()
-            .toLowerCase();
-
-
-    if (
-        !/^[a-z0-9_]{3,30}$/.test(
-            value
-        )
-    ) {
-
-        throw new Error(
-            "Username must contain 3–30 letters, numbers or underscores."
-        );
-
-    }
-
-
-    return value;
-
-}
-
-
-/* =========================================================
-   EMAIL VALIDATION
-========================================================= */
-
-function validateEmail(
-    email
-) {
-
-    if (
-        typeof email !== "string"
-    ) {
-
-        throw new Error(
-            "Email is required."
-        );
-
-    }
-
-
-    const value =
-        email
-            .trim()
-            .toLowerCase();
-
-
-    if (
-        value.length > 254
-    ) {
-
-        throw new Error(
-            "Email address is too long."
-        );
-
-    }
-
-
-    /*
-     * Basic format check.
-     *
-     * Production email verification will confirm ownership
-     * of the address.
-     */
-
-    if (
-        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
-            value
-        )
-    ) {
-
-        throw new Error(
-            "Invalid email address."
-        );
-
-    }
-
-
-    return value;
-
-}
-
-
-/* =========================================================
-   CREATE USER
-========================================================= */
-
-export async function createUser(
-    db,
-    {
-        email,
-        username,
-        password,
-        displayName = ""
-    }
-) {
-
-    const normalizedEmail =
-        validateEmail(
-            email
-        );
-
-
-    const normalizedUsername =
-        validateUsername(
-            username
-        );
-
-
-    const passwordHash =
-        await hashPassword(
-            password
-        );
-
-
-    /*
-     * Check duplicates.
-     */
-
-    const existing =
-        await db.prepare(
-            `
-            SELECT
-                id
-            FROM users
-            WHERE email = ?
-               OR username = ?
-            LIMIT 1
-            `
-        )
-        .bind(
-            normalizedEmail,
-            normalizedUsername
-        )
-        .first();
-
-
-    if (
-        existing
-    ) {
-
-        throw new Error(
-            "Email or username is already registered."
-        );
-
-    }
-
-
-    const userId =
-        `user_${crypto.randomUUID()}`;
-
-
-    await db.prepare(
-        `
-        INSERT INTO users (
-
-            id,
-
-            email,
-
-            username,
-
-            display_name,
-
-            created_at,
-
-            updated_at
-
-        )
-
-        VALUES (
-
-            ?,
-
-            ?,
-
-            ?,
-
-            ?,
-
-            CURRENT_TIMESTAMP,
-
-            CURRENT_TIMESTAMP
-
-        )
-        `
-    )
-    .bind(
-
-        userId,
-
-        normalizedEmail,
-
-        normalizedUsername,
-
-        String(
-            displayName || ""
-        )
-            .trim()
-            .slice(0, 100)
-
-    )
-    .run();
-
-
-    /*
-     * Password hash is stored separately as JSON in a secure
-     * account field in the production schema.
-     *
-     * The current schema does not yet have that column.
-     *
-     * FILE 16 will add the security migration and account
-     * credential storage.
-     */
 
     return {
 
         id:
-            userId,
+            user.id,
 
         email:
-            normalizedEmail,
-
-        username:
-            normalizedUsername
-
-    };
-
-}
-
-
-/* =========================================================
-   LOGIN
-========================================================= */
-
-export async function loginUser(
-    db,
-    {
-        email,
-        password
-    }
-) {
-
-    const normalizedEmail =
-        validateEmail(
-            email
-        );
-
-
-    const user =
-        await db.prepare(
-            `
-            SELECT
-                *
-            FROM users
-            WHERE email = ?
-            LIMIT 1
-            `
-        )
-        .bind(
-            normalizedEmail
-        )
-        .first();
-
-
-    /*
-     * Do not reveal whether the email exists.
-     */
-
-    if (!user) {
-
-        throw new Error(
-            "Invalid email or password."
-        );
-
-    }
-
-
-    /*
-     * Password verification will use the credential record
-     * added by the security migration.
-     */
-
-    if (
-        !user.password_hash
-    ) {
-
-        throw new Error(
-            "Account credentials are not configured."
-        );
-
-    }
-
-
-    let stored;
-
-
-    try {
-
-        stored =
-            JSON.parse(
-                user.password_hash
-            );
-
-    } catch {
-
-        throw new Error(
-            "Account credentials are invalid."
-        );
-
-    }
-
-
-    const valid =
-        await verifyPassword(
-            password,
-            stored
-        );
-
-
-    if (
-        !valid
-    ) {
-
-        throw new Error(
-            "Invalid email or password."
-        );
-
-    }
-
-
-    const session =
-        await createSession(
-            db,
-            user.id
-        );
-
-
-    return {
-
-        user: {
-
-            id:
-                user.id,
-
-            email:
-                user.email,
-
-            username:
-                user.username,
-
-            displayName:
-                user.display_name,
-
-            ageVerified:
-                Number(
-                    user.age_verified
-                ) === 1
-
-        },
-
-        session
-
-    };
-
-}
-
-
-/* =========================================================
-   CREATE SESSION
-========================================================= */
-
-export async function createSession(
-    db,
-    userId
-) {
-
-    const token =
-        randomToken(
-            32
-        );
-
-
-    const tokenHash =
-        await sha256(
-            token
-        );
-
-
-    const sessionId =
-        `session_${crypto.randomUUID()}`;
-
-
-    const expires =
-        new Date();
-
-
-    expires.setDate(
-        expires.getDate() +
-        SESSION_DAYS
-    );
-
-
-    await db.prepare(
-        `
-        INSERT INTO sessions (
-
-            id,
-
-            user_id,
-
-            token_hash,
-
-            expires_at
-
-        )
-
-        VALUES (
-
-            ?,
-
-            ?,
-
-            ?,
-
-            ?
-
-        )
-        `
-    )
-    .bind(
-
-        sessionId,
-
-        userId,
-
-        tokenHash,
-
-        expires.toISOString()
-
-    )
-    .run();
-
-
-    return {
-
-        token,
-
-        expiresAt:
-            expires.toISOString()
-
-    };
-
-}
-
-
-/* =========================================================
-   COOKIE
-========================================================= */
-
-export function createSessionCookie(
-    token,
-    expiresAt
-) {
-
-    return [
-
-        `${SESSION_COOKIE}=${token}`,
-
-        "Path=/",
-
-        "HttpOnly",
-
-        "Secure",
-
-        "SameSite=Lax",
-
-        `Expires=${new Date(
-            expiresAt
-        ).toUTCString()}`
-
-    ].join("; ");
-
-}
-
-
-/* =========================================================
-   CLEAR COOKIE
-========================================================= */
-
-export function clearSessionCookie() {
-
-    return [
-
-        `${SESSION_COOKIE}=deleted`,
-
-        "Path=/",
-
-        "HttpOnly",
-
-        "Secure",
-
-        "SameSite=Lax",
-
-        "Max-Age=0"
-
-    ].join("; ");
-
-}
-
-
-/* =========================================================
-   READ COOKIE
-========================================================= */
-
-function getCookie(
-    request,
-    name
-) {
-
-    const cookieHeader =
-        request.headers.get(
-            "Cookie"
-        );
-
-
-    if (
-        !cookieHeader
-    ) {
-
-        return null;
-
-    }
-
-
-    const cookies =
-        cookieHeader.split(
-            ";"
-        );
-
-
-    for (
-        const cookie
-        of cookies
-    ) {
-
-        const index =
-            cookie.indexOf(
-                "="
-            );
-
-
-        if (
-            index === -1
-        ) {
-
-            continue;
-
-        }
-
-
-        const key =
-            cookie
-                .slice(
-                    0,
-                    index
-                )
-                .trim();
-
-
-        if (
-            key !== name
-        ) {
-
-            continue;
-
-        }
-
-
-        return cookie
-            .slice(
-                index + 1
-            )
-            .trim();
-
-    }
-
-
-    return null;
-
-}
-
-
-/* =========================================================
-   AUTHENTICATE REQUEST
-========================================================= */
-
-export async function authenticateRequest(
-    db,
-    request
-) {
-
-    const token =
-        getCookie(
-            request,
-            SESSION_COOKIE
-        );
-
-
-    if (
-        !token
-    ) {
-
-        return null;
-
-    }
-
-
-    const tokenHash =
-        await sha256(
-            token
-        );
-
-
-    const session =
-        await db.prepare(
-            `
-            SELECT
-
-                s.id AS session_id,
-
-                s.user_id,
-
-                s.expires_at,
-
-                u.email,
-
-                u.username,
-
-                u.display_name,
-
-                u.age_verified
-
-            FROM sessions s
-
-            JOIN users u
-                ON u.id = s.user_id
-
-            WHERE s.token_hash = ?
-
-              AND s.expires_at >
-                  CURRENT_TIMESTAMP
-
-            LIMIT 1
-            `
-        )
-        .bind(
-            tokenHash
-        )
-        .first();
-
-
-    if (!session) {
-
-        return null;
-
-    }
-
-
-    return {
-
-        sessionId:
-            session.session_id,
-
-        userId:
-            session.user_id,
-
-        email:
-            session.email,
-
-        username:
-            session.username,
-
-        displayName:
-            session.display_name,
+            user.email,
+
+        emailVerified:
+            Number(
+                user.email_verified
+            ) === 1,
 
         ageVerified:
             Number(
-                session.age_verified
-            ) === 1
+                user.age_verified
+            ) === 1,
 
-    };
-
-}
-
-
-/* =========================================================
-   REQUIRE AUTHENTICATION
-========================================================= */
-
-export async function requireAuthentication(
-    db,
-    request
-) {
-
-    const user =
-        await authenticateRequest(
-            db,
-            request
-        );
-
-
-    if (!user) {
-
-        throw new Error(
-            "Authentication required."
-        );
-
-    }
-
-
-    return user;
-
-}
-
-
-/* =========================================================
-   LOGOUT
-========================================================= */
-
-export async function logoutUser(
-    db,
-    request
-) {
-
-    const token =
-        getCookie(
-            request,
-            SESSION_COOKIE
-        );
-
-
-    if (
-        token
-    ) {
-
-        const tokenHash =
-            await sha256(
-                token
-            );
-
-
-        await db.prepare(
-            `
-            DELETE FROM sessions
-            WHERE token_hash = ?
-            `
-        )
-        .bind(
-            tokenHash
-        )
-        .run();
-
-    }
-
-
-    return {
-
-        loggedOut:
-            true
-
-    };
-
-}
-
-
-/* =========================================================
-   AGE VERIFICATION
-========================================================= */
-
-export async function markAgeVerified(
-    db,
-    userId
-) {
-
-    if (
-        !userId
-    ) {
-
-        throw new Error(
-            "Authentication required."
-        );
-
-    }
-
-
-    await db.prepare(
-        `
-        UPDATE users
-
-        SET
-
-            age_verified =
-                1,
-
-            updated_at =
-                CURRENT_TIMESTAMP
-
-        WHERE id = ?
-        `
-    )
-    .bind(
-        userId
-    )
-    .run();
-
-
-    return {
-
-        userId,
-
-        ageVerified:
-            true
-
-    };
-
-}
-
-
-/* =========================================================
-   GET CURRENT USER
-========================================================= */
-
-export async function getCurrentUser(
-    db,
-    request
-) {
-
-    const auth =
-        await authenticateRequest(
-            db,
-            request
-        );
-
-
-    if (!auth) {
-
-        return null;
-
-    }
-
-
-    return {
-
-        id:
-            auth.userId,
-
-        email:
-            auth.email,
-
-        username:
-            auth.username,
-
-        displayName:
-            auth.displayName,
-
-        ageVerified:
-            auth.ageVerified
+        createdAt:
+            user.created_at
 
     };
 
@@ -1365,12 +1172,10 @@ export async function getCurrentUser(
 
 export {
 
-    SESSION_DAYS,
-
     SESSION_COOKIE,
 
-    PASSWORD_MIN_LENGTH,
+    SESSION_DAYS,
 
-    PASSWORD_MAX_LENGTH
+    MIN_PASSWORD_LENGTH
 
 };
