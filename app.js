@@ -1,1010 +1,874 @@
 "use strict";
 
-import {
-    getPublicConfig
-} from "./config.js";
-
-import {
-    getCanvasStatistics,
-    getPixelState,
-    findOwnershipAt
-} from "./allocator.js";
-
-import {
-    createOrder,
-    getOrderStatus,
-    cancelOrder
-} from "./orders.js";
-
-import {
-    createBitcoinQuote,
-    attachBitcoinQuoteToOrder,
-    getBitcoinPaymentStatus,
-    verifyBitcoinPayment
-} from "./bitcoin.js";
-
-import {
-    createContent,
-    getContent,
-    listOwnershipContent,
-    publishContent,
-    hideContent,
-    reportContent
-} from "./content.js";
+/*
+ * =========================================================
+ * BILLION PIXEL CANVAS
+ * FRONTEND APPLICATION
+ * =========================================================
+ *
+ * The browser NEVER decides:
+ *
+ * - pixel price
+ * - ownership
+ * - Bitcoin amount
+ * - payment confirmation
+ *
+ * Those values come from the server.
+ */
 
 
 /* =========================================================
-   API ROUTER
+   CONFIG
 ========================================================= */
 
-export async function handleApi(
-    request,
-    env,
-    ctx
-) {
+const API_BASE =
+    "/api";
 
-    const url =
-        new URL(
-            request.url
+
+const CANVAS_WIDTH =
+    40000;
+
+
+const CANVAS_HEIGHT =
+    25000;
+
+
+const TOTAL_PIXELS =
+    1_000_000_000;
+
+
+const PRICE_PER_PIXEL =
+    1;
+
+
+const ADULT_MINIMUM =
+    100_000;
+
+
+/* =========================================================
+   STATE
+========================================================= */
+
+const state = {
+
+    user:
+        null,
+
+    authenticated:
+        false,
+
+    selectedDistrict:
+        "main",
+
+    quantity:
+        1,
+
+    zoom:
+        1,
+
+    canvas:
+
+        null,
+
+    context:
+
+        null,
+
+    viewport:
+
+        null,
+
+    dragging:
+        false,
+
+    dragStartX:
+        0,
+
+    dragStartY:
+        0,
+
+    offsetX:
+        0,
+
+    offsetY:
+        0,
+
+    pixels:
+        new Map(),
+
+    stats:
+        {
+
+            total:
+                TOTAL_PIXELS,
+
+            sold:
+                0,
+
+            available:
+                TOTAL_PIXELS,
+
+            valueSold:
+                0
+
+        },
+
+    csrfToken:
+        null
+
+};
+
+
+/* =========================================================
+   DOM
+========================================================= */
+
+const $ =
+    selector =>
+        document.querySelector(
+            selector
         );
 
 
-    const path =
-        url.pathname
-            .replace(
-                /^\/api\/?/,
-                ""
+const canvas =
+    $("#pixelCanvas");
+
+
+const viewport =
+    $("#canvasViewport");
+
+
+/* =========================================================
+   INITIALIZATION
+========================================================= */
+
+document.addEventListener(
+    "DOMContentLoaded",
+    initialize
+);
+
+
+async function initialize() {
+
+    state.canvas =
+        canvas;
+
+
+    state.context =
+        canvas.getContext(
+            "2d"
+        );
+
+
+    state.viewport =
+        viewport;
+
+
+    setupNavigation();
+
+    setupPurchaseUI();
+
+    setupAuthUI();
+
+    setupCanvas();
+
+    setupDistricts();
+
+    await loadStats();
+
+    await loadCurrentUser();
+
+    drawCanvas();
+
+}
+
+
+/* =========================================================
+   NAVIGATION
+========================================================= */
+
+function setupNavigation() {
+
+    $("#buyHeroButton")
+        ?.addEventListener(
+            "click",
+            () => openPurchase(
+                "main"
             )
-            .replace(
-                /\/+$/,
-                ""
+        );
+
+
+    $("#loginButton")
+        ?.addEventListener(
+            "click",
+            openAuth
+        );
+
+
+    $("#logoutButton")
+        ?.addEventListener(
+            "click",
+            logout
+        );
+
+}
+
+
+/* =========================================================
+   PURCHASE UI
+========================================================= */
+
+function setupPurchaseUI() {
+
+    $("#closePurchase")
+        ?.addEventListener(
+            "click",
+            closePurchase
+        );
+
+
+    $("#continuePurchase")
+        ?.addEventListener(
+            "click",
+            beginPurchase
+        );
+
+
+    $("#pixelQuantity")
+        ?.addEventListener(
+            "input",
+            updatePurchaseTotal
+        );
+
+
+    $("#districtSelect")
+        ?.addEventListener(
+            "change",
+            event => {
+
+                state.selectedDistrict =
+                    event.target.value;
+
+                updateAdultNotice();
+
+                updatePurchaseTotal();
+
+            }
+        );
+
+}
+
+
+/* =========================================================
+   OPEN PURCHASE
+========================================================= */
+
+function openPurchase(
+    district = "main"
+) {
+
+    state.selectedDistrict =
+        district;
+
+
+    $("#districtSelect").value =
+        district;
+
+
+    $("#pixelQuantity").value =
+        district === "adult"
+            ? ADULT_MINIMUM
+            : 1;
+
+
+    updateAdultNotice();
+
+    updatePurchaseTotal();
+
+
+    const panel =
+        $("#purchasePanel");
+
+
+    panel.classList.remove(
+        "hidden"
+    );
+
+
+    panel.setAttribute(
+        "aria-hidden",
+        "false"
+    );
+
+}
+
+
+/* =========================================================
+   CLOSE PURCHASE
+========================================================= */
+
+function closePurchase() {
+
+    const panel =
+        $("#purchasePanel");
+
+
+    panel.classList.add(
+        "hidden"
+    );
+
+
+    panel.setAttribute(
+        "aria-hidden",
+        "true"
+    );
+
+}
+
+
+/* =========================================================
+   PURCHASE TOTAL
+========================================================= */
+
+function updatePurchaseTotal() {
+
+    const quantity =
+        getQuantity();
+
+
+    const total =
+        quantity *
+        PRICE_PER_PIXEL;
+
+
+    $("#purchaseTotal")
+        .textContent =
+            formatUsd(
+                total
             );
 
+}
 
-    const method =
-        request.method.toUpperCase();
+
+/* =========================================================
+   ADULT NOTICE
+========================================================= */
+
+function updateAdultNotice() {
+
+    const isAdult =
+        state.selectedDistrict ===
+        "adult";
+
+
+    $("#adultNotice")
+        .classList.toggle(
+            "hidden",
+            !isAdult
+        );
+
+
+    $("#pixelQuantity")
+        .min =
+            isAdult
+                ? String(
+                    ADULT_MINIMUM
+                )
+                : "1";
+
+}
+
+
+/* =========================================================
+   QUANTITY
+========================================================= */
+
+function getQuantity() {
+
+    const input =
+        $("#pixelQuantity");
+
+
+    const quantity =
+        Number(
+            input.value
+        );
+
+
+    if (
+        !Number.isSafeInteger(
+            quantity
+        )
+    ) {
+
+        return 1;
+
+    }
+
+
+    if (
+        quantity < 1
+    ) {
+
+        return 1;
+
+    }
+
+
+    return quantity;
+
+}
+
+
+/* =========================================================
+   BEGIN PURCHASE
+========================================================= */
+
+async function beginPurchase() {
+
+    const quantity =
+        getQuantity();
+
+
+    state.quantity =
+        quantity;
+
+
+    if (
+        state.selectedDistrict ===
+        "adult" &&
+        quantity <
+            ADULT_MINIMUM
+    ) {
+
+        showMessage(
+            "adultNotice",
+            `Adult District requires at least ${ADULT_MINIMUM.toLocaleString()} pixels.`
+        );
+
+        return;
+
+    }
+
+
+    /*
+     * Login required.
+     */
+
+    if (
+        !state.authenticated
+    ) {
+
+        closePurchase();
+
+        openAuth();
+
+        showAuthMessage(
+            "Sign in or create an account before purchasing."
+        );
+
+        return;
+
+    }
 
 
     try {
 
-        /*
-         * Public configuration.
-         */
-
-        if (
-            method === "GET" &&
-            path === "config"
-        ) {
-
-            return json(
-                getPublicConfig()
-            );
-
-        }
-
-
-        /*
-         * Canvas statistics.
-         */
-
-        if (
-            method === "GET" &&
-            path === "canvas/stats"
-        ) {
-
-            const stats =
-                await getCanvasStatistics(
-                    env.DB
-                );
-
-
-            return json(
-                stats
-            );
-
-        }
-
-
-        /*
-         * Pixel lookup.
-         *
-         * /api/pixel/123
-         */
-
-        const pixelMatch =
-            path.match(
-                /^pixel\/(\d+)$/
-            );
-
-
-        if (
-            method === "GET" &&
-            pixelMatch
-        ) {
-
-            const pixelId =
-                Number(
-                    pixelMatch[1]
-                );
-
-
-            const pixel =
-                await getPixelState(
-                    env.DB,
-                    pixelId
-                );
-
-
-            return json(
-                sanitizePixel(
-                    pixel
-                )
-            );
-
-        }
-
-
-        /*
-         * Coordinate ownership lookup.
-         *
-         * /api/ownership/main/100/200
-         */
-
-        const coordinateMatch =
-            path.match(
-                /^ownership\/([^/]+)\/(\d+)\/(\d+)$/
-            );
-
-
-        if (
-            method === "GET" &&
-            coordinateMatch
-        ) {
-
-            const districtId =
-                decodeURIComponent(
-                    coordinateMatch[1]
-                );
-
-
-            const x =
-                Number(
-                    coordinateMatch[2]
-                );
-
-
-            const y =
-                Number(
-                    coordinateMatch[3]
-                );
-
-
-            const ownership =
-                await findOwnershipAt(
-                    env.DB,
-                    districtId,
-                    x,
-                    y
-                );
-
-
-            return json(
-                ownership
-                    ? sanitizeOwnership(
-                        ownership
-                    )
-                    : null
-            );
-
-        }
-
-
-        /*
-         * Create order.
-         *
-         * POST /api/orders
-         *
-         * Body:
-         *
-         * {
-         *   "districtId": "main",
-         *   "quantity": 10
-         * }
-         */
-
-        if (
-            method === "POST" &&
-            path === "orders"
-        ) {
-
-            const user =
-                await requireUser(
-                    request,
-                    env
-                );
-
-
-            const body =
-                await readJson(
-                    request
-                );
-
-
-            const order =
-                await createOrder(
-                    env.DB,
-                    {
-
-                        userId:
-                            user.id,
-
-                        districtId:
-                            body.districtId,
-
-                        quantity:
-                            body.quantity
-
-                    }
-                );
-
-
-            /*
-             * Generate BTC quote using the server-side USD
-             * order total.
-             */
-
-            const quote =
-                await createBitcoinQuote(
-                    order.priceUsd,
-                    env
-                );
-
-
-            await attachBitcoinQuoteToOrder(
-                env.DB,
+        const order =
+            await api(
+                "/orders",
                 {
 
-                    orderId:
-                        order.id,
+                    method:
+                        "POST",
 
-                    quote
+                    body: {
+
+                        districtId:
+                            state.selectedDistrict,
+
+                        quantity
+
+                    }
 
                 }
             );
 
 
-            return json({
+        closePurchase();
 
-                orderId:
-                    order.id,
 
-                quantity:
-                    order.quantity,
-
-                priceUsd:
-                    order.priceUsd,
-
-                pricePerPixelUsd:
-                    1,
-
-                paymentCurrency:
-                    "BTC",
-
-                bitcoinAmount:
-                    quote.btcAmount,
-
-                bitcoinAmountSatoshis:
-                    quote.btcAmountSatoshis,
-
-                paymentAddress:
-                    quote.paymentAddress,
-
-                btcUsdRate:
-                    quote.btcUsdRate,
-
-                quoteExpiresAt:
-                    quote.expiresAt
-
-            }, 201);
-
-        }
-
-
-        /*
-         * Get order.
-         *
-         * GET /api/orders/:id
-         */
-
-        const orderMatch =
-            path.match(
-                /^orders\/([^/]+)$/
-            );
-
-
-        if (
-            method === "GET" &&
-            orderMatch
-        ) {
-
-            const user =
-                await requireUser(
-                    request,
-                    env
-                );
-
-
-            const orderId =
-                decodeURIComponent(
-                    orderMatch[1]
-                );
-
-
-            const result =
-                await getOrderStatus(
-                    env.DB,
-                    orderId
-                );
-
-
-            if (!result) {
-
-                return json(
-                    {
-                        error:
-                            "Order not found."
-                    },
-                    404
-                );
-
-            }
-
-
-            if (
-                result.order.user_id !==
-                user.id
-            ) {
-
-                return json(
-                    {
-                        error:
-                            "Access denied."
-                    },
-                    403
-                );
-
-            }
-
-
-            return json(
-                sanitizeOrder(
-                    result
-                )
-            );
-
-        }
-
-
-        /*
-         * Cancel order.
-         *
-         * POST /api/orders/:id/cancel
-         */
-
-        const cancelMatch =
-            path.match(
-                /^orders\/([^/]+)\/cancel$/
-            );
-
-
-        if (
-            method === "POST" &&
-            cancelMatch
-        ) {
-
-            const user =
-                await requireUser(
-                    request,
-                    env
-                );
-
-
-            const orderId =
-                decodeURIComponent(
-                    cancelMatch[1]
-                );
-
-
-            const existing =
-                await getOrderStatus(
-                    env.DB,
-                    orderId
-                );
-
-
-            if (!existing) {
-
-                return json(
-                    {
-                        error:
-                            "Order not found."
-                    },
-                    404
-                );
-
-            }
-
-
-            if (
-                existing.order.user_id !==
-                user.id
-            ) {
-
-                return json(
-                    {
-                        error:
-                            "Access denied."
-                    },
-                    403
-                );
-
-            }
-
-
-            const result =
-                await cancelOrder(
-                    env.DB,
-                    orderId
-                );
-
-
-            return json(
-                result
-            );
-
-        }
-
-
-        /*
-         * Get Bitcoin payment status.
-         *
-         * GET /api/orders/:id/payment
-         */
-
-        const paymentMatch =
-            path.match(
-                /^orders\/([^/]+)\/payment$/
-            );
-
-
-        if (
-            method === "GET" &&
-            paymentMatch
-        ) {
-
-            const user =
-                await requireUser(
-                    request,
-                    env
-                );
-
-
-            const orderId =
-                decodeURIComponent(
-                    paymentMatch[1]
-                );
-
-
-            const order =
-                await getOrderStatus(
-                    env.DB,
-                    orderId
-                );
-
-
-            if (!order) {
-
-                return json(
-                    {
-                        error:
-                            "Order not found."
-                    },
-                    404
-                );
-
-            }
-
-
-            if (
-                order.order.user_id !==
-                user.id
-            ) {
-
-                return json(
-                    {
-                        error:
-                            "Access denied."
-                    },
-                    403
-                );
-
-            }
-
-
-            const payment =
-                await getBitcoinPaymentStatus(
-                    env.DB,
-                    orderId
-                );
-
-
-            return json(
-                payment
-            );
-
-        }
-
-
-        /*
-         * Verify Bitcoin payment.
-         *
-         * The transaction ID is optional.
-         *
-         * The server independently verifies the blockchain
-         * transaction and receiving address.
-         */
-
-        const verifyPaymentMatch =
-            path.match(
-                /^orders\/([^/]+)\/verify-payment$/
-            );
-
-
-        if (
-            method === "POST" &&
-            verifyPaymentMatch
-        ) {
-
-            const user =
-                await requireUser(
-                    request,
-                    env
-                );
-
-
-            const orderId =
-                decodeURIComponent(
-                    verifyPaymentMatch[1]
-                );
-
-
-            const order =
-                await getOrderStatus(
-                    env.DB,
-                    orderId
-                );
-
-
-            if (!order) {
-
-                return json(
-                    {
-                        error:
-                            "Order not found."
-                    },
-                    404
-                );
-
-            }
-
-
-            if (
-                order.order.user_id !==
-                user.id
-            ) {
-
-                return json(
-                    {
-                        error:
-                            "Access denied."
-                    },
-                    403
-                );
-
-            }
-
-
-            const body =
-                await readJson(
-                    request,
-                    true
-                );
-
-
-            const payment =
-                await verifyBitcoinPayment(
-                    env.DB,
-                    env,
-                    {
-
-                        orderId,
-
-                        transactionId:
-                            body?.transactionId ||
-                            null
-
-                    }
-                );
-
-
-            /*
-             * When payment is fully confirmed, permanently
-             * finalize ownership.
-             */
-
-            if (
-                payment.status ===
-                "CONFIRMED"
-            ) {
-
-                const {
-                    completePaidOrder
-                } = await import(
-                    "./orders.js"
-                );
-
-
-                await completePaidOrder(
-                    env.DB,
-                    orderId
-                );
-
-            }
-
-
-            return json(
-                payment
-            );
-
-        }
-
-
-        /*
-         * Create content.
-         *
-         * POST /api/content
-         */
-
-        if (
-            method === "POST" &&
-            path === "content"
-        ) {
-
-            const user =
-                await requireUser(
-                    request,
-                    env
-                );
-
-
-            const body =
-                await readJson(
-                    request
-                );
-
-
-            const result =
-                await createContent(
-                    env.DB,
-                    {
-
-                        ownershipId:
-                            body.ownershipId,
-
-                        userId:
-                            user.id,
-
-                        content:
-                            body.content
-
-                    }
-                );
-
-
-            return json(
-                sanitizeContent(
-                    result
-                ),
-                201
-            );
-
-        }
-
-
-        /*
-         * Get content.
-         *
-         * GET /api/content/:id
-         */
-
-        const contentMatch =
-            path.match(
-                /^content\/([^/]+)$/
-            );
-
-
-        if (
-            method === "GET" &&
-            contentMatch
-        ) {
-
-            const contentId =
-                decodeURIComponent(
-                    contentMatch[1]
-                );
-
-
-            const content =
-                await getContent(
-                    env.DB,
-                    contentId
-                );
-
-
-            if (!content) {
-
-                return json(
-                    {
-                        error:
-                            "Content not found."
-                    },
-                    404
-                );
-
-            }
-
-
-            return json(
-                sanitizeContent(
-                    content
-                )
-            );
-
-        }
-
-
-        /*
-         * Publish content.
-         */
-
-        const publishMatch =
-            path.match(
-                /^content\/([^/]+)\/publish$/
-            );
-
-
-        if (
-            method === "POST" &&
-            publishMatch
-        ) {
-
-            const user =
-                await requireUser(
-                    request,
-                    env
-                );
-
-
-            const contentId =
-                decodeURIComponent(
-                    publishMatch[1]
-                );
-
-
-            const result =
-                await publishContent(
-                    env.DB,
-                    {
-
-                        contentId,
-
-                        userId:
-                            user.id
-
-                    }
-                );
-
-
-            return json(
-                sanitizeContent(
-                    result
-                )
-            );
-
-        }
-
-
-        /*
-         * Hide content.
-         */
-
-        const hideMatch =
-            path.match(
-                /^content\/([^/]+)\/hide$/
-            );
-
-
-        if (
-            method === "POST" &&
-            hideMatch
-        ) {
-
-            const user =
-                await requireUser(
-                    request,
-                    env
-                );
-
-
-            const contentId =
-                decodeURIComponent(
-                    hideMatch[1]
-                );
-
-
-            const result =
-                await hideContent(
-                    env.DB,
-                    {
-
-                        contentId,
-
-                        userId:
-                            user.id
-
-                    }
-                );
-
-
-            return json(
-                sanitizeContent(
-                    result
-                )
-            );
-
-        }
-
-
-        /*
-         * List content belonging to an ownership record.
-         */
-
-        const ownershipContentMatch =
-            path.match(
-                /^ownership\/([^/]+)\/content$/
-            );
-
-
-        if (
-            method === "GET" &&
-            ownershipContentMatch
-        ) {
-
-            const ownershipId =
-                decodeURIComponent(
-                    ownershipContentMatch[1]
-                );
-
-
-            const result =
-                await listOwnershipContent(
-                    env.DB,
-                    ownershipId
-                );
-
-
-            return json(
-                result.results.map(
-                    sanitizeContent
-                )
-            );
-
-        }
-
-
-        /*
-         * Report content.
-         */
-
-        const reportMatch =
-            path.match(
-                /^content\/([^/]+)\/report$/
-            );
-
-
-        if (
-            method === "POST" &&
-            reportMatch
-        ) {
-
-            const user =
-                await optionalUser(
-                    request,
-                    env
-                );
-
-
-            const body =
-                await readJson(
-                    request
-                );
-
-
-            const result =
-                await reportContent(
-                    env.DB,
-                    {
-
-                        contentId:
-                            decodeURIComponent(
-                                reportMatch[1]
-                            ),
-
-                        reporterUserId:
-                            user?.id ||
-                            null,
-
-                        reason:
-                            body.reason,
-
-                        details:
-                            body.details
-
-                    }
-                );
-
-
-            return json(
-                result,
-                201
-            );
-
-        }
-
-
-        return json(
-            {
-                error:
-                    "API endpoint not found."
-            },
-            404
+        showPaymentModal(
+            order
         );
 
+    } catch (
+        error
+    ) {
+
+        alert(
+            error.message
+        );
+
+    }
+
+}
+
+
+/* =========================================================
+   PAYMENT MODAL
+========================================================= */
+
+function showPaymentModal(
+    order
+) {
+
+    const overlay =
+        document.createElement(
+            "div"
+        );
+
+
+    overlay.className =
+        "purchase-panel";
+
+
+    overlay.id =
+        "paymentOverlay";
+
+
+    overlay.innerHTML = `
+
+        <div class="purchase-card">
+
+            <button
+                class="modal-close"
+                id="closePayment"
+                type="button"
+            >
+                ×
+            </button>
+
+            <div class="eyebrow">
+                BITCOIN PAYMENT
+            </div>
+
+            <h2>
+                Complete your purchase.
+            </h2>
+
+            <div class="payment-summary">
+
+                <div>
+                    <span>Pixels</span>
+                    <strong>
+                        ${formatNumber(
+                            order.quantity
+                        )}
+                    </strong>
+                </div>
+
+                <div>
+                    <span>Total</span>
+                    <strong>
+                        ${formatUsd(
+                            order.priceUsd
+                        )}
+                    </strong>
+                </div>
+
+                <div>
+                    <span>BTC to send</span>
+                    <strong>
+                        ${escapeHtml(
+                            String(
+                                order.bitcoinAmount
+                            )
+                        )}
+                    </strong>
+                </div>
+
+            </div>
+
+            <div class="btc-address">
+
+                <span>
+                    Send BTC to
+                </span>
+
+                <code>
+                    ${escapeHtml(
+                        order.paymentAddress
+                    )}
+                </code>
+
+                <button
+                    id="copyBtcAddress"
+                    class="button button-outline button-wide"
+                    type="button"
+                >
+                    Copy address
+                </button>
+
+            </div>
+
+            <div class="payment-status">
+                <span>
+                    Payment status
+                </span>
+
+                <strong id="paymentStatus">
+                    Awaiting payment
+                </strong>
+            </div>
+
+            <button
+                id="verifyPayment"
+                class="button button-primary button-wide"
+                type="button"
+            >
+                Check payment
+            </button>
+
+            <p class="purchase-note">
+                Your pixels become permanently sold only
+                after the Bitcoin payment has been independently
+                verified and confirmed.
+            </p>
+
+        </div>
+
+    `;
+
+
+    document.body.appendChild(
+        overlay
+    );
+
+
+    $("#closePayment")
+        .addEventListener(
+            "click",
+            () => {
+
+                overlay.remove();
+
+            }
+        );
+
+
+    $("#copyBtcAddress")
+        .addEventListener(
+            "click",
+            async () => {
+
+                try {
+
+                    await navigator.clipboard.writeText(
+                        order.paymentAddress
+                    );
+
+
+                    $("#copyBtcAddress")
+                        .textContent =
+                            "Copied";
+
+                } catch {
+
+                    alert(
+                        order.paymentAddress
+                    );
+
+                }
+
+            }
+        );
+
+
+    $("#verifyPayment")
+        .addEventListener(
+            "click",
+            () =>
+                checkPayment(
+                    order.id
+                )
+        );
+
+
+    pollPayment(
+        order.id
+    );
+
+}
+
+
+/* =========================================================
+   PAYMENT POLLING
+========================================================= */
+
+let paymentPollingTimer =
+    null;
+
+
+function pollPayment(
+    orderId
+) {
+
+    clearInterval(
+        paymentPollingTimer
+    );
+
+
+    paymentPollingTimer =
+        setInterval(
+            () =>
+                checkPayment(
+                    orderId,
+                    true
+                ),
+            15_000
+        );
+
+
+    checkPayment(
+        orderId,
+        true
+    );
+
+}
+
+
+/* =========================================================
+   CHECK PAYMENT
+========================================================= */
+
+async function checkPayment(
+    orderId,
+    silent = false
+) {
+
+    try {
+
+        const payment =
+            await api(
+                `/orders/${encodeURIComponent(
+                    orderId
+                )}/payment`
+            );
+
+
+        const status =
+            payment.status ||
+            "AWAITING_PAYMENT";
+
+
+        const statusElement =
+            $("#paymentStatus");
+
+
+        if (
+            statusElement
+        ) {
+
+            statusElement.textContent =
+                paymentStatusText(
+                    status,
+                    payment.confirmations
+                );
+
+        }
+
+
+        if (
+            status ===
+            "CONFIRMED"
+        ) {
+
+            clearInterval(
+                paymentPollingTimer
+            );
+
+
+            await finalizePayment(
+                orderId
+            );
+
+        }
+
+    } catch (
+        error
+    ) {
+
+        if (!silent) {
+
+            alert(
+                error.message
+            );
+
+        }
+
+    }
+
+}
+
+
+/* =========================================================
+   FINALIZE PAYMENT
+========================================================= */
+
+async function finalizePayment(
+    orderId
+) {
+
+    try {
+
+        const result =
+            await api(
+                `/orders/${encodeURIComponent(
+                    orderId
+                )}/verify-payment`,
+                {
+
+                    method:
+                        "POST",
+
+                    body: {}
+
+                }
+            );
+
+
+        if (
+            result.status ===
+            "CONFIRMED"
+        ) {
+
+            const status =
+                $("#paymentStatus");
+
+
+            if (
+                status
+            ) {
+
+                status.textContent =
+                    "Payment confirmed. Your pixels are permanently owned.";
+
+            }
+
+
+            await loadStats();
+
+            drawCanvas();
+
+        }
 
     } catch (
         error
     ) {
 
         console.error(
-            "API error:",
             error
-        );
-
-
-        const status =
-            Number(
-                error.status
-            ) ||
-            400;
-
-
-        return json(
-            {
-                error:
-                    error.message ||
-                    "Request failed."
-            },
-            status
         );
 
     }
@@ -1013,119 +877,1305 @@ export async function handleApi(
 
 
 /* =========================================================
-   AUTH HELPERS
+   PAYMENT STATUS TEXT
 ========================================================= */
 
-async function requireUser(
-    request,
-    env
+function paymentStatusText(
+    status,
+    confirmations = 0
 ) {
 
-    const {
-        getAuthenticatedUser
-    } = await import(
-        "./auth.js"
-    );
+    switch (
+        status
+    ) {
 
+        case "AWAITING_PAYMENT":
 
-    const user =
-        await getAuthenticatedUser(
-            request,
-            env
-        );
+            return "Awaiting Bitcoin payment.";
 
+        case "UNDERPAID":
 
-    if (!user) {
+            return "Payment received, but the amount is insufficient.";
 
-        const error =
-            new Error(
-                "Authentication required."
-            );
+        case "CONFIRMING":
 
+            return `Bitcoin payment detected — ${Number(
+                confirmations || 0
+            )} confirmations.`;
 
-        error.status =
-            401;
+        case "CONFIRMED":
 
+            return "Bitcoin payment confirmed.";
 
-        throw error;
+        default:
+
+            return status;
 
     }
-
-
-    return user;
 
 }
 
 
-async function optionalUser(
-    request,
-    env
+/* =========================================================
+   AUTH UI
+========================================================= */
+
+let authMode =
+    "login";
+
+
+function setupAuthUI() {
+
+    $("#closeAuth")
+        ?.addEventListener(
+            "click",
+            closeAuth
+        );
+
+
+    $("#authForm")
+        ?.addEventListener(
+            "submit",
+            submitAuth
+        );
+
+
+    $("#switchAuthMode")
+        ?.addEventListener(
+            "click",
+            switchAuthMode
+        );
+
+}
+
+
+/* =========================================================
+   OPEN AUTH
+========================================================= */
+
+function openAuth() {
+
+    authMode =
+        "login";
+
+
+    updateAuthMode();
+
+
+    const panel =
+        $("#authPanel");
+
+
+    panel.classList.remove(
+        "hidden"
+    );
+
+
+    panel.setAttribute(
+        "aria-hidden",
+        "false"
+    );
+
+}
+
+
+/* =========================================================
+   CLOSE AUTH
+========================================================= */
+
+function closeAuth() {
+
+    const panel =
+        $("#authPanel");
+
+
+    panel.classList.add(
+        "hidden"
+    );
+
+
+    panel.setAttribute(
+        "aria-hidden",
+        "true"
+    );
+
+}
+
+
+/* =========================================================
+   AUTH MODE
+========================================================= */
+
+function updateAuthMode() {
+
+    const registerMode =
+        authMode ===
+        "register";
+
+
+    $("#authTitle")
+        .textContent =
+            registerMode
+                ? "Create an account."
+                : "Sign in.";
+
+
+    $("#authSubmit")
+        .textContent =
+            registerMode
+                ? "Create account"
+                : "Sign in";
+
+
+    $("#switchAuthMode")
+        .textContent =
+            registerMode
+                ? "Already have an account?"
+                : "Create an account";
+
+
+    const password =
+        $("#authPassword");
+
+
+    if (
+        password
+    ) {
+
+        password.autocomplete =
+            registerMode
+                ? "new-password"
+                : "current-password";
+
+    }
+
+}
+
+
+/* =========================================================
+   SWITCH AUTH
+========================================================= */
+
+function switchAuthMode() {
+
+    authMode =
+        authMode ===
+        "login"
+            ? "register"
+            : "login";
+
+
+    updateAuthMode();
+
+}
+
+
+/* =========================================================
+   SUBMIT AUTH
+========================================================= */
+
+async function submitAuth(
+    event
 ) {
+
+    event.preventDefault();
+
+
+    const email =
+        $("#authEmail")
+            .value
+            .trim();
+
+
+    const password =
+        $("#authPassword")
+            .value;
+
 
     try {
 
-        const {
-            getAuthenticatedUser
-        } = await import(
-            "./auth.js"
+        if (
+            authMode ===
+            "register"
+        ) {
+
+            await api(
+                "/auth/register",
+                {
+
+                    method:
+                        "POST",
+
+                    body: {
+
+                        email,
+
+                        password
+
+                    }
+
+                }
+            );
+
+
+            showAuthMessage(
+                "Account created. You can now sign in."
+            );
+
+
+            authMode =
+                "login";
+
+
+            updateAuthMode();
+
+
+            return;
+
+        }
+
+
+        await api(
+            "/auth/login",
+            {
+
+                method:
+                    "POST",
+
+                body: {
+
+                    email,
+
+                    password
+
+                }
+
+            }
         );
 
 
-        return await getAuthenticatedUser(
-            request,
-            env
+        await loadCurrentUser();
+
+        closeAuth();
+
+    } catch (
+        error
+    ) {
+
+        showAuthMessage(
+            error.message
+        );
+
+    }
+
+}
+
+
+/* =========================================================
+   LOAD CURRENT USER
+========================================================= */
+
+async function loadCurrentUser() {
+
+    try {
+
+        const result =
+            await api(
+                "/auth/me"
+            );
+
+
+        state.authenticated =
+            Boolean(
+                result.authenticated
+            );
+
+
+        state.user =
+            result.user ||
+            null;
+
+
+        updateAccountUI();
+
+    } catch {
+
+        state.authenticated =
+            false;
+
+        state.user =
+            null;
+
+    }
+
+}
+
+
+/* =========================================================
+   LOGOUT
+========================================================= */
+
+async function logout() {
+
+    try {
+
+        await api(
+            "/auth/logout",
+            {
+                method:
+                    "POST",
+                body: {}
+            }
+        );
+
+    } catch (
+        error
+    ) {
+
+        console.error(
+            error
+        );
+
+    }
+
+
+    state.authenticated =
+        false;
+
+
+    state.user =
+        null;
+
+
+    updateAccountUI();
+
+}
+
+
+/* =========================================================
+   ACCOUNT UI
+========================================================= */
+
+function updateAccountUI() {
+
+    const account =
+        $("#accountSection");
+
+
+    const login =
+        $("#loginButton");
+
+
+    if (
+        state.authenticated
+    ) {
+
+        account
+            ?.classList
+            .remove(
+                "hidden"
+            );
+
+
+        if (
+            login
+        ) {
+
+            login.textContent =
+                "Account";
+
+        }
+
+
+        $("#accountEmail")
+            .textContent =
+                state.user?.email ||
+                "—";
+
+    } else {
+
+        account
+            ?.classList
+            .add(
+                "hidden"
+            );
+
+
+        if (
+            login
+        ) {
+
+            login.textContent =
+                "Sign in";
+
+        }
+
+    }
+
+}
+
+
+/* =========================================================
+   STATS
+========================================================= */
+
+async function loadStats() {
+
+    try {
+
+        const stats =
+            await api(
+                "/canvas/stats"
+            );
+
+
+        state.stats =
+            {
+
+                total:
+                    Number(
+                        stats.total ||
+                        TOTAL_PIXELS
+                    ),
+
+                sold:
+                    Number(
+                        stats.sold ||
+                        0
+                    ),
+
+                available:
+                    Number(
+                        stats.available ??
+                        (
+                            TOTAL_PIXELS -
+                            Number(
+                                stats.sold ||
+                                0
+                            )
+                        )
+                    ),
+
+                valueSold:
+                    Number(
+                        stats.valueSold ||
+                        (
+                            Number(
+                                stats.sold ||
+                                0
+                            ) *
+                            PRICE_PER_PIXEL
+                        )
+                    )
+
+            };
+
+
+        updateStatsUI();
+
+    } catch (
+        error
+    ) {
+
+        console.error(
+            error
+        );
+
+    }
+
+}
+
+
+/* =========================================================
+   STATS UI
+========================================================= */
+
+function updateStatsUI() {
+
+    $("#totalPixels")
+        .textContent =
+            formatNumber(
+                state.stats.total
+            );
+
+
+    $("#soldPixels")
+        .textContent =
+            formatNumber(
+                state.stats.sold
+            );
+
+
+    $("#availablePixels")
+        .textContent =
+            formatNumber(
+                state.stats.available
+            );
+
+
+    $("#valueSold")
+        .textContent =
+            formatUsd(
+                state.stats.valueSold
+            );
+
+}
+
+
+/* =========================================================
+   CANVAS
+========================================================= */
+
+function setupCanvas() {
+
+    resizeCanvas();
+
+
+    window.addEventListener(
+        "resize",
+        resizeCanvas
+    );
+
+
+    canvas.addEventListener(
+        "pointermove",
+        handleCanvasMove
+    );
+
+
+    canvas.addEventListener(
+        "pointerdown",
+        handleCanvasPointerDown
+    );
+
+
+    canvas.addEventListener(
+        "pointerup",
+        handleCanvasPointerUp
+    );
+
+
+    canvas.addEventListener(
+        "pointerleave",
+        handleCanvasPointerUp
+    );
+
+
+    canvas.addEventListener(
+        "wheel",
+        handleCanvasWheel,
+        {
+            passive:
+                false
+        }
+    );
+
+
+    $("#zoomInButton")
+        ?.addEventListener(
+            "click",
+            () =>
+                changeZoom(
+                    1.25
+                )
+        );
+
+
+    $("#zoomOutButton")
+        ?.addEventListener(
+            "click",
+            () =>
+                changeZoom(
+                    0.8
+                )
+        );
+
+}
+
+
+/* =========================================================
+   RESIZE CANVAS
+========================================================= */
+
+function resizeCanvas() {
+
+    const rect =
+        viewport.getBoundingClientRect();
+
+
+    const dpr =
+        window.devicePixelRatio ||
+        1;
+
+
+    canvas.width =
+        Math.max(
+            1,
+            Math.floor(
+                rect.width *
+                dpr
+            )
+        );
+
+
+    canvas.height =
+        Math.max(
+            1,
+            Math.floor(
+                rect.height *
+                dpr
+            )
+        );
+
+
+    canvas.style.width =
+        `${rect.width}px`;
+
+
+    canvas.style.height =
+        `${rect.height}px`;
+
+
+    state.context.setTransform(
+        dpr,
+        0,
+        0,
+        dpr,
+        0,
+        0
+    );
+
+
+    drawCanvas();
+
+}
+
+
+/* =========================================================
+   DRAW CANVAS
+========================================================= */
+
+function drawCanvas() {
+
+    if (
+        !state.context ||
+        !viewport
+    ) {
+
+        return;
+
+    }
+
+
+    const ctx =
+        state.context;
+
+
+    const rect =
+        viewport.getBoundingClientRect();
+
+
+    ctx.clearRect(
+        0,
+        0,
+        rect.width,
+        rect.height
+    );
+
+
+    /*
+     * Background.
+     */
+
+    ctx.fillStyle =
+        "#080808";
+
+
+    ctx.fillRect(
+        0,
+        0,
+        rect.width,
+        rect.height
+    );
+
+
+    /*
+     * We intentionally render a zoomed overview rather than
+     * attempting to draw one billion individual pixels.
+     *
+     * Actual ownership blocks will be loaded progressively.
+     */
+
+    const baseScale =
+        Math.min(
+            rect.width /
+                CANVAS_WIDTH,
+            rect.height /
+                CANVAS_HEIGHT
+        );
+
+
+    const scale =
+        baseScale *
+        state.zoom;
+
+
+    const width =
+        CANVAS_WIDTH *
+        scale;
+
+
+    const height =
+        CANVAS_HEIGHT *
+        scale;
+
+
+    const x =
+        (
+            rect.width -
+            width
+        ) /
+        2 +
+        state.offsetX;
+
+
+    const y =
+        (
+            rect.height -
+            height
+        ) /
+        2 +
+        state.offsetY;
+
+
+    ctx.strokeStyle =
+        "rgba(255,255,255,.15)";
+
+
+    ctx.lineWidth =
+        1;
+
+
+    ctx.strokeRect(
+        x,
+        y,
+        width,
+        height
+    );
+
+
+    /*
+     * District outlines.
+     */
+
+    drawDistrict(
+        ctx,
+        x,
+        y,
+        scale,
+        0,
+        0,
+        40000,
+        18000
+    );
+
+
+    drawDistrict(
+        ctx,
+        x,
+        y,
+        scale,
+        4000,
+        4000,
+        10000,
+        6000
+    );
+
+
+    drawDistrict(
+        ctx,
+        x,
+        y,
+        scale,
+        26000,
+        4000,
+        10000,
+        6000
+    );
+
+
+    drawDistrict(
+        ctx,
+        x,
+        y,
+        scale,
+        0,
+        18000,
+        40000,
+        7000
+    );
+
+
+    /*
+     * Draw known sold/reserved pixels only.
+     */
+
+    for (
+        const pixel
+        of state.pixels.values()
+    ) {
+
+        const px =
+            x +
+            pixel.x *
+            scale;
+
+
+        const py =
+            y +
+            pixel.y *
+            scale;
+
+
+        const size =
+            Math.max(
+                1,
+                scale
+            );
+
+
+        ctx.fillStyle =
+            pixel.status ===
+                "SOLD"
+                ? "#ffffff"
+                : "#777777";
+
+
+        ctx.fillRect(
+            px,
+            py,
+            size,
+            size
+        );
+
+    }
+
+}
+
+
+/* =========================================================
+   DISTRICT DRAW
+========================================================= */
+
+function drawDistrict(
+    ctx,
+    originX,
+    originY,
+    scale,
+    x,
+    y,
+    width,
+    height
+) {
+
+    ctx.strokeRect(
+
+        originX +
+            x *
+            scale,
+
+        originY +
+            y *
+            scale,
+
+        width *
+            scale,
+
+        height *
+            scale
+
+    );
+
+}
+
+
+/* =========================================================
+   CANVAS MOVE
+========================================================= */
+
+function handleCanvasMove(
+    event
+) {
+
+    const coordinate =
+        eventToCanvasCoordinate(
+            event
+        );
+
+
+    if (
+        coordinate
+    ) {
+
+        $("#cursorCoordinate")
+            .textContent =
+                `${coordinate.x.toLocaleString()}, ${coordinate.y.toLocaleString()}`;
+
+    }
+
+
+    if (
+        !state.dragging
+    ) {
+
+        return;
+
+    }
+
+
+    state.offsetX =
+        event.clientX -
+        state.dragStartX +
+        state.dragOriginalOffsetX;
+
+
+    state.offsetY =
+        event.clientY -
+        state.dragStartY +
+        state.dragOriginalOffsetY;
+
+
+    drawCanvas();
+
+}
+
+
+/* =========================================================
+   POINTER DOWN
+========================================================= */
+
+function handleCanvasPointerDown(
+    event
+) {
+
+    state.dragging =
+        true;
+
+
+    state.dragStartX =
+        event.clientX;
+
+
+    state.dragStartY =
+        event.clientY;
+
+
+    state.dragOriginalOffsetX =
+        state.offsetX;
+
+
+    state.dragOriginalOffsetY =
+        state.offsetY;
+
+
+    canvas.setPointerCapture(
+        event.pointerId
+    );
+
+}
+
+
+/* =========================================================
+   POINTER UP
+========================================================= */
+
+function handleCanvasPointerUp(
+    event
+) {
+
+    state.dragging =
+        false;
+
+
+    try {
+
+        canvas.releasePointerCapture(
+            event.pointerId
         );
 
     } catch {
+
+        // Ignore.
+
+    }
+
+}
+
+
+/* =========================================================
+   WHEEL ZOOM
+========================================================= */
+
+function handleCanvasWheel(
+    event
+) {
+
+    event.preventDefault();
+
+
+    changeZoom(
+        event.deltaY < 0
+            ? 1.1
+            : 0.9
+    );
+
+}
+
+
+/* =========================================================
+   CHANGE ZOOM
+========================================================= */
+
+function changeZoom(
+    factor
+) {
+
+    state.zoom =
+        Math.min(
+            50,
+            Math.max(
+                0.25,
+                state.zoom *
+                factor
+            )
+        );
+
+
+    $("#zoomLevel")
+        .textContent =
+            `${Math.round(
+                state.zoom *
+                100
+            )}%`;
+
+
+    drawCanvas();
+
+}
+
+
+/* =========================================================
+   COORDINATE
+========================================================= */
+
+function eventToCanvasCoordinate(
+    event
+) {
+
+    const rect =
+        canvas.getBoundingClientRect();
+
+
+    const baseScale =
+        Math.min(
+            rect.width /
+                CANVAS_WIDTH,
+            rect.height /
+                CANVAS_HEIGHT
+        );
+
+
+    const scale =
+        baseScale *
+        state.zoom;
+
+
+    const canvasWidth =
+        CANVAS_WIDTH *
+        scale;
+
+
+    const canvasHeight =
+        CANVAS_HEIGHT *
+        scale;
+
+
+    const originX =
+        (
+            rect.width -
+            canvasWidth
+        ) /
+        2 +
+        state.offsetX;
+
+
+    const originY =
+        (
+            rect.height -
+            canvasHeight
+        ) /
+        2 +
+        state.offsetY;
+
+
+    const x =
+        Math.floor(
+            (
+                event.clientX -
+                rect.left -
+                originX
+            ) /
+            scale
+        );
+
+
+    const y =
+        Math.floor(
+            (
+                event.clientY -
+                rect.top -
+                originY
+            ) /
+            scale
+        );
+
+
+    if (
+        x < 0 ||
+        y < 0 ||
+        x >= CANVAS_WIDTH ||
+        y >= CANVAS_HEIGHT
+    ) {
 
         return null;
 
     }
 
+
+    return {
+
+        x,
+
+        y
+
+    };
+
 }
 
 
 /* =========================================================
-   JSON BODY
+   DISTRICTS
 ========================================================= */
 
-async function readJson(
-    request,
-    optional = false
+function setupDistricts() {
+
+    document
+        .querySelectorAll(
+            ".district-buy"
+        )
+        .forEach(
+            button => {
+
+                button.addEventListener(
+                    "click",
+                    () =>
+                        openPurchase(
+                            button.dataset
+                                .district
+                        )
+                );
+
+            }
+        );
+
+}
+
+
+/* =========================================================
+   API
+========================================================= */
+
+async function api(
+    path,
+    options = {}
 ) {
 
+    const requestOptions = {
+
+        method:
+            options.method ||
+            "GET",
+
+        credentials:
+            "include",
+
+        headers: {
+
+            "Accept":
+                "application/json",
+
+            ...(options.body
+                ? {
+                    "Content-Type":
+                        "application/json"
+                }
+                : {}),
+
+            ...(options.headers ||
+                {})
+
+        }
+
+    };
+
+
+    if (
+        options.body
+    ) {
+
+        requestOptions.body =
+            JSON.stringify(
+                options.body
+            );
+
+    }
+
+
+    const response =
+        await fetch(
+            `${API_BASE}${path}`,
+            requestOptions
+        );
+
+
     const contentType =
-        request.headers.get(
+        response.headers.get(
             "content-type"
         ) ||
         "";
 
 
+    const data =
+        contentType.includes(
+            "application/json"
+        )
+            ? await response.json()
+            : null;
+
+
     if (
-        !contentType
-            .toLowerCase()
-            .includes(
-                "application/json"
-            )
+        !response.ok
     ) {
 
-        if (
-            optional
-        ) {
-
-            return {};
-
-        }
-
-
         const error =
             new Error(
-                "Request must use application/json."
+                data?.error ||
+                `Request failed (${response.status}).`
             );
 
 
         error.status =
-            415;
+            response.status;
 
 
         throw error;
@@ -1133,298 +2183,156 @@ async function readJson(
     }
 
 
-    try {
-
-        return await request.json();
-
-    } catch {
-
-        const error =
-            new Error(
-                "Invalid JSON request body."
-            );
-
-
-        error.status =
-            400;
-
-
-        throw error;
-
-    }
-
-}
-
-
-/* =========================================================
-   PIXEL SANITIZATION
-========================================================= */
-
-function sanitizePixel(
-    pixel
-) {
-
-    if (!pixel) {
-
-        return null;
-
-    }
-
-
-    return {
-
-        pixelId:
-            pixel.pixelId,
-
-        x:
-            pixel.x,
-
-        y:
-            pixel.y,
-
-        districtId:
-            pixel.districtId,
-
-        status:
-            pixel.status,
-
-        /*
-         * Do not expose another user's internal IDs through
-         * a public pixel lookup.
-         */
-
-        owned:
-            pixel.status === "SOLD"
-
-    };
-
-}
-
-
-/* =========================================================
-   OWNERSHIP SANITIZATION
-========================================================= */
-
-function sanitizeOwnership(
-    ownership
-) {
-
-    if (!ownership) {
-
-        return null;
-
-    }
-
-
-    return {
-
-        id:
-            ownership.id,
-
-        pixelId:
-            ownership.pixel_id,
-
-        districtId:
-            ownership.district_id,
-
-        x:
-            ownership.x,
-
-        y:
-            ownership.y,
-
-        status:
-            ownership.status,
-
-        createdAt:
-            ownership.created_at
-
-    };
-
-}
-
-
-/* =========================================================
-   ORDER SANITIZATION
-========================================================= */
-
-function sanitizeOrder(
-    result
-) {
-
-    return {
-
-        order: {
-
-            id:
-                result.order.id,
-
-            quantity:
-                result.order.quantity,
-
-            priceUsd:
-                result.order.price_usd,
-
-            paymentCurrency:
-                result.order.payment_currency,
-
-            status:
-                result.order.status,
-
-            createdAt:
-                result.order.created_at,
-
-            completedAt:
-                result.order.completed_at
-
-        },
-
-        allocation:
-            result.allocation.map(
-                pixel => ({
-
-                    pixelId:
-                        pixel.pixel_id,
-
-                    districtId:
-                        pixel.district_id,
-
-                    x:
-                        pixel.x,
-
-                    y:
-                        pixel.y,
-
-                    status:
-                        pixel.status
-
-                })
-            ),
-
-        payment:
-            result.payment
-                ? {
-
-                    status:
-                        result.payment.status,
-
-                    paymentAddress:
-                        result.payment.payment_address,
-
-                    expectedSatoshis:
-                        result.payment.expected_satoshis,
-
-                    receivedSatoshis:
-                        result.payment.received_satoshis,
-
-                    transactionId:
-                        result.payment.transaction_id,
-
-                    confirmations:
-                        result.payment.confirmation_count
-
-                }
-                : null
-
-    };
-
-}
-
-
-/* =========================================================
-   CONTENT SANITIZATION
-========================================================= */
-
-function sanitizeContent(
-    content
-) {
-
-    if (!content) {
-
-        return null;
-
-    }
-
-
-    return {
-
-        id:
-            content.id,
-
-        ownershipId:
-            content.ownershipId,
-
-        contentType:
-            content.contentType,
-
-        title:
-            content.title,
-
-        description:
-            content.description,
-
-        imageUrl:
-            content.imageUrl,
-
-        externalUrl:
-            content.externalUrl,
-
-        altText:
-            content.altText,
-
-        isAdultContent:
-            Boolean(
-                content.isAdultContent
-            ),
-
-        status:
-            content.status,
-
-        district:
-            content.district,
-
-        createdAt:
-            content.createdAt,
-
-        publishedAt:
-            content.publishedAt
-
-    };
-
-}
-
-
-/* =========================================================
-   RESPONSE
-========================================================= */
-
-function json(
-    data,
-    status = 200
-) {
-
-    return new Response(
-
-        JSON.stringify(
-            data
-        ),
-
-        {
-
-            status,
-
-            headers: {
-
-                "Content-Type":
-                    "application/json; charset=utf-8",
-
-                "Cache-Control":
-                    "no-store"
-
-            }
-
-        }
-
+    return (
+        data ||
+        {}
     );
 
 }
+
+
+/* =========================================================
+   AUTH MESSAGE
+========================================================= */
+
+function showAuthMessage(
+    message
+) {
+
+    const element =
+        $("#authMessage");
+
+
+    if (
+        !element
+    ) {
+
+        return;
+
+    }
+
+
+    element.textContent =
+        message;
+
+}
+
+
+/* =========================================================
+   GENERIC MESSAGE
+========================================================= */
+
+function showMessage(
+    elementId,
+    message
+) {
+
+    const element =
+        document.getElementById(
+            elementId
+        );
+
+
+    if (
+        element
+    ) {
+
+        element.textContent =
+            message;
+
+    }
+
+}
+
+
+/* =========================================================
+   NUMBER FORMATTING
+========================================================= */
+
+function formatNumber(
+    value
+) {
+
+    return Number(
+        value
+    ).toLocaleString(
+        "en-US"
+    );
+
+}
+
+
+/* =========================================================
+   USD
+========================================================= */
+
+function formatUsd(
+    value
+) {
+
+    return (
+        "$" +
+        Number(
+            value
+        ).toLocaleString(
+            "en-US",
+            {
+                maximumFractionDigits:
+                    0
+            }
+        )
+    );
+
+}
+
+
+/* =========================================================
+   HTML ESCAPING
+========================================================= */
+
+function escapeHtml(
+    value
+) {
+
+    return String(
+        value
+    )
+        .replace(
+            /&/g,
+            "&amp;"
+        )
+        .replace(
+            /</g,
+            "&lt;"
+        )
+        .replace(
+            />/g,
+            "&gt;"
+        )
+        .replace(
+            /"/g,
+            "&quot;"
+        )
+        .replace(
+            /'/g,
+            "&#039;"
+        );
+
+}
+
+
+/* =========================================================
+   EXPORT FOR DEBUGGING
+========================================================= */
+
+window.BillionPixelCanvas = {
+
+    state,
+
+    openPurchase,
+
+    openAuth,
+
+    loadStats
+
+};
